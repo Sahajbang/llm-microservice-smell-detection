@@ -1,0 +1,154 @@
+[
+  {
+    "caller": "admin-server",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "admin-server depends_on config-server"
+  },
+  {
+    "caller": "admin-server",
+    "callee": "discovery-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "admin-server depends_on discovery-server"
+  },
+  {
+    "caller": "api-gateway",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "api-gateway depends_on config-server"
+  },
+  {
+    "caller": "api-gateway",
+    "callee": "customers-service",
+    "source": "webclient",
+    "file": "spring-petclinic-api-gateway/src/main/java/org/springframework/samples/petclinic/api/application/CustomersServiceClient.java",
+    "line": 37,
+    "evidence": ".uri(\"http://customers-service/owners/{ownerId}\", ownerId)"
+  },
+  {
+    "caller": "api-gateway",
+    "callee": "discovery-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "api-gateway depends_on discovery-server"
+  },
+  {
+    "caller": "api-gateway",
+    "callee": "visits-service",
+    "source": "webclient",
+    "file": "spring-petclinic-api-gateway/src/main/java/org/springframework/samples/petclinic/api/application/VisitsServiceClient.java",
+    "line": 34,
+    "evidence": "private String hostname = \"http://visits-service/\";"
+  },
+  {
+    "caller": "customers-service",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "customers-service depends_on config-server"
+  },
+  {
+    "caller": "customers-service",
+    "callee": "discovery-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "customers-service depends_on discovery-server"
+  },
+  {
+    "caller": "customers-service",
+    "callee": "visits-service",
+    "source": "resttemplate",
+    "file": "spring-petclinic-customers-service/src/main/java/org/springframework/samples/petclinic/customers/web/VisitsServiceClient.java",
+    "line": 50,
+    "evidence": "\"http://visits-service/pets/visits?petId={petId}\", Map.class, petId);"
+  },
+  {
+    "caller": "discovery-server",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "discovery-server depends_on config-server"
+  },
+  {
+    "caller": "genai-service",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "genai-service depends_on config-server"
+  },
+  {
+    "caller": "genai-service",
+    "callee": "customers-service",
+    "source": "discovery-client",
+    "file": "spring-petclinic-genai-service/src/main/java/org/springframework/samples/petclinic/genai/AIDataProvider.java",
+    "line": 90,
+    "evidence": "discoveryClient.getInstances(\"customers-service\")"
+  },
+  {
+    "caller": "genai-service",
+    "callee": "discovery-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "genai-service depends_on discovery-server"
+  },
+  {
+    "caller": "genai-service",
+    "callee": "vets-service",
+    "source": "webclient",
+    "file": "spring-petclinic-genai-service/src/main/java/org/springframework/samples/petclinic/genai/VectorStoreController.java",
+    "line": 67,
+    "evidence": "String vetsHostname = \"http://vets-service/\";"
+  },
+  {
+    "caller": "vets-service",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "vets-service depends_on config-server"
+  },
+  {
+    "caller": "vets-service",
+    "callee": "discovery-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "vets-service depends_on discovery-server"
+  },
+  {
+    "caller": "visits-service",
+    "callee": "config-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "visits-service depends_on config-server"
+  },
+  {
+    "caller": "visits-service",
+    "callee": "customers-service",
+    "source": "resttemplate",
+    "file": "spring-petclinic-visits-service/src/main/java/org/springframework/samples/petclinic/visits/web/CustomersServiceClient.java",
+    "line": 48,
+    "evidence": "\"http://customers-service/owners/-/pets/{petId}\", Object.class, petId);"
+  },
+  {
+    "caller": "visits-service",
+    "callee": "discovery-server",
+    "source": "docker-compose",
+    "file": "docker-compose.yml",
+    "line": 0,
+    "evidence": "visits-service depends_on discovery-server"
+  }
+]

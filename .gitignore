@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Env / secrets
+.env
+IGNORE/api-keys.txt
+
+# Pipeline run logs (reproducible from code, not tracked)
+logs/runs/
+
+# Cloned external target repo (not part of this deliverable)
+target-repo/
+
+# OS
+.DS_Store
+Thumbs.db
