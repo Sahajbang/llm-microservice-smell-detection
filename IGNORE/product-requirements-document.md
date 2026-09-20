@@ -30,7 +30,46 @@ Existing literature has two disconnected strands:
 ## 3. Goals
 
 - Detect architectural smells (starting with **Cyclic Dependency**, then **Hub-like Dependency**) across microservice boundaries using a Service Dependency Graph.
-- Ground LLM reasoning in deterministic static-analysis evidence and graph context, rather than treating the LLM as an unquestionable detector.
+- Ground LLM reasoning in deterministic static-analysis evidence and graph context, rather than treating the LLM as an unquest
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ionable detector.
 - Generate constrained, scope-limited refactoring plans — not unrestricted rewrites.
 - Automatically verify proposed refactorings via compile/test/re-detection gates before acceptance.
 - Produce a reproducible, measurable experimental pipeline suitable for thesis-level evaluation.

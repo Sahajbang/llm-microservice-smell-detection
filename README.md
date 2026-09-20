@@ -102,6 +102,8 @@ referenced above. Tested in [`tests/test_run_logger.py`](tests/test_run_logger.p
 
 ```
 pipeline/         Steps 2-5, 7 (extractor, graph analysis, LLM agents, logging)
+api/              Read-only FastAPI layer over logs/ for the frontend (see Dashboard)
+frontend/         Vite + React + TypeScript dashboard (see Dashboard)
 tests/            pytest suite, one file per pipeline module
 target-repo/      cloned target repo (gitignored — see Setup)
 logs/             logs/edges_current.json (sample) + logs/runs/ (per-run stage logs)
@@ -109,9 +111,31 @@ IGNORE/           reference docs only (PRD) — never commit generated output he
 CLAUDE.md         full phased implementation guide
 ```
 
+## Dashboard
+
+A dashboard visualizes what the pipeline already produces on disk: an interactive Service
+Dependency Graph (`/graph`, hand-laid-out SVG — services that only appear in docker-compose
+`depends_on` are drawn as muted infra nodes, real call edges are solid, cycle edges are
+highlighted), the Step 4 detection verdict and Step 5 refactoring proposal with their full
+LLM reasoning traces (`/detection`, `/refactoring`), and the run log history (`/runs`). It's
+read-only for now: it renders `logs/edges_current.json` and `logs/runs/*/*.json`, it doesn't
+trigger pipeline runs (there's no orchestrator to call yet — see Issue #3 below).
+
+- `api/main.py` is a thin FastAPI layer that reuses `pipeline.graph_analysis` directly rather
+  than re-deriving cycle detection in JS. Run from the repo root: `python -m uvicorn api.main:app
+  --reload --port 8000`.
+- `frontend/` is a Vite + React + TypeScript SPA (Tailwind v4, hand-built SVG graph, no chart/graph
+  library). Vite's dev server proxies `/api` to `127.0.0.1:8000` (not `localhost` — on hosts
+  where Node resolves `localhost` to `::1` only, that mismatches uvicorn's IPv4-only bind and
+  every request 502s). `cd frontend && npm install && npm run dev`, then open the printed
+  `localhost:5173` URL.
+- `npm test` in `frontend/` runs a small Vitest suite covering the graph layout's node
+  classification and cycle-edge separation logic.
+
 ## Setup
 
-1. `python -m venv .venv` and activate it, then `pip install -r requirements.txt`.
+1. `python -m venv .venv` and activate it, then `pip install -r requirements.txt` (includes
+   FastAPI/uvicorn for the dashboard's API).
 2. Copy `.env.example` to `.env` and fill in your own `NVIDIA_API_KEY` (free tier at
    https://build.nvidia.com) — required for Steps 4-5. `.env` is gitignored; never commit it.
 3. Clone the target repo yourself — it is **not** part of this git history:
@@ -123,6 +147,7 @@ CLAUDE.md         full phased implementation guide
    Developer A's task lands, you'll need to recreate `target-repo/FIXTURE_NOTES.md`'s changes
    by hand.
 4. Run tests: `python -m pytest tests/ -q`.
+5. For the dashboard: see **Dashboard** above.
 
 ---
 

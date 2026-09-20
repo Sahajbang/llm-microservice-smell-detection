@@ -12,8 +12,13 @@ IGNORE/api-keys.txt
 # Pipeline run logs (reproducible from code, not tracked)
 logs/runs/
 
-# Cloned external target repo (not part of this deliverable)
-target-repo/
+# target-repo's own nested .git was moved aside so its files push as
+# regular files in this repo; don't track the leftover backup.
+target-repo/.git.bak/
+
+#Skills
+.claude/
+.agents/
 
 # OS
 .DS_Store
