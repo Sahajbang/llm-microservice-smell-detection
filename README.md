@@ -1,21 +1,67 @@
 # LLM-Guided Microservice Code Smell Detection & Autonomous Refactoring
 
-Phase 1 MVP: detect the **Cyclic Dependency** architectural smell in a Java Spring Boot
-microservices repository using static analysis (regex extraction + graph cycle detection),
-confirm it with an LLM, propose a scope-limited fix with a second LLM call, and log every
-stage for reproducibility. Full spec and rationale: [CLAUDE.md](CLAUDE.md).
+Detect architectural smells in a Java Spring Boot microservices repository using static
+analysis, have an LLM confirm whether each finding is a genuine problem, propose a
+scope-limited fix with a second LLM call, and log every stage for reproducibility. The
+pipeline takes a **Git URL or a local path** and runs **multiple smell detectors** in one
+pass. Full spec and rationale: [CLAUDE.md](CLAUDE.md).
+
+## Quick start
+
+```bash
+# Analyze a repository by URL (clones it into workspace/, then deletes it)
+python -m pipeline.run_pipeline https://github.com/owner/repo.git
+
+# Analyze a local checkout, deterministic detection only (no API key needed)
+python -m pipeline.run_pipeline target-repo --no-llm
+
+# One smell only, writing the unified result somewhere
+python -m pipeline.run_pipeline target-repo --smells cyclic_dependency --output result.json
+```
+
+Or drive it from the dashboard — pick the repository and the smells in the browser and watch
+the run stage by stage (see [Dashboard](#dashboard)):
+
+```bash
+python -m uvicorn api.main:app --reload --port 8000   # terminal 1, from the repo root
+cd frontend && npm install && npm run dev             # terminal 2
+```
+
+## Supported smells
+
+| Smell | Detection | Evidence source | Status |
+|---|---|---|---|
+| **Cyclic Dependency** | NetworkX `simple_cycles` on the service dependency graph | Feign / RestTemplate / WebClient / DiscoveryClient call sites | ✅ Implemented + LLM validated |
+| **Hub-like Dependency** | Degree vs. the graph's own degree distribution, plus a connectivity-share test | Same dependency graph | ✅ Implemented + LLM validated |
+| **Shared Persistence** | Services resolving to one database identity, or declaring the same tables | Datasource config, JPA `@Table`, SQL schema/migrations, compose env | ✅ Implemented + LLM validated |
+| Temporal coupling | — | — | ❌ Not implemented (see [Known limitations](#known-limitations)) |
+
+Every smell is **statically detected first** and **LLM validated second**: the model is
+never asked to find smells, only to judge a candidate that deterministic analysis already
+produced, and to explain its reasoning. The LLM's verdict never overwrites the
+deterministic severity/confidence; both are recorded.
+
+**Scope provenance:** CLAUDE.md and the PRD specify two smells — Cyclic Dependency (Phase 1)
+and Hub-like Dependency (Phase 2+). Shared Persistence is implemented in addition to those;
+it is a standard microservice anti-pattern and is statically observable, but it is not part
+of the original PRD scope.
 
 ## Status at a glance
 
 | Step | What | Status |
 |---|---|---|
 | 1 | Select & verify target repo | ✅ Done |
-| 2 | Dependency extractor | ✅ Done |
-| 3 | Graph + cycle detection | ✅ Done |
-| 4 | LLM Detection Agent | ✅ Done — run once against real evidence |
-| 5 | LLM Refactoring Agent | ✅ Done — run once against real evidence |
-| 6 | Manual apply & verify | ❌ **Not started — next task** |
-| 7 | Per-run logging | ✅ Done |
+| 2 | Dependency extractor | ✅ Done — generalized into `pipeline/extractors/` |
+| 3 | Graph + cycle detection | ✅ Done — cycles now canonicalized |
+| 4 | LLM Detection Agent | ✅ Done — generalized to any smell |
+| 5 | LLM Refactoring Agent | ✅ Done — generalized to any smell |
+| 6 | Manual apply & verify | ❌ **Not started** |
+| 7 | Per-run logging | ✅ Done — generalized to multi-smell runs |
+| — | Repository acquisition (Git URL / local path) | ✅ Done |
+| — | Pipeline orchestrator (`run_pipeline.py`) | ✅ Done |
+| — | Hub-like Dependency detector | ✅ Done |
+| — | Shared Persistence detector | ✅ Done |
+| — | Dashboard (API + frontend) | ✅ Done — starts runs (repo URL or local, smell selection, live progress) and renders multi-smell results |
 
 ---
 
@@ -33,12 +79,11 @@ deliberately introduced between `customers-service` and `visits-service` (two ne
 additive, self-contained endpoints on each side — no existing endpoint, class, or test was
 touched). Full details, rationale, and the resulting dependency graph are documented in
 [`target-repo/FIXTURE_NOTES.md`](target-repo/FIXTURE_NOTES.md). `mvn clean install` and
-`mvn test` were re-verified clean after introducing it. This lives on the
-`thesis/phase1-cyclic-dependency-fixture` branch inside `target-repo`'s own git history.
+`mvn test` were re-verified clean after introducing it.
 
-**`target-repo/` is intentionally excluded from this repo's git history** (it's a clone of
-an external project with its own `.git`) — see [Setup](#setup) and
-[Current Issues](#current-issues) below for what that means for the team.
+**`target-repo/` is now committed into this repository** (its own nested `.git` was removed
+so its files track as ordinary files here), so a fresh clone reproduces the exact tree the
+run logs were produced against — no patch file or separate clone step needed.
 
 ### Step 2 — Dependency extractor ([`pipeline/extractor.py`](pipeline/extractor.py))
 Regex/string-matching extractor (no AST parsing, per scope) that scans each Maven module's
@@ -98,39 +143,177 @@ referenced above. Tested in [`tests/test_run_logger.py`](tests/test_run_logger.p
 
 ---
 
+## Pipeline architecture
+
+```
+repository acquisition   pipeline/repository.py    Git URL or local path -> working tree
+         |                                          + branch/commit metadata
+         v
+evidence extraction      pipeline/extractors/      rest.py, docker.py, persistence.py
+         |                                          -> normalized EvidenceBundle
+         v
+service dependency graph pipeline/graph_analysis.py NetworkX DiGraph (compose edges excluded)
+         |
+         v
+smell detectors          pipeline/detectors/       registry: cyclic_dependency,
+         |                                          hub_dependency, shared_persistence
+         v                                          -> Finding objects
+LLM validation           pipeline/llm_detection.py  per finding, prompt built from the
+         |                                          smell's spec in pipeline/smells.py
+         v
+LLM refactoring          pipeline/llm_refactoring.py scope-checked proposal, no code edits
+         |
+         v
+logging + result         pipeline/run_logger.py     one directory per run
+                         pipeline/models.py         unified AnalysisResult
+```
+
+`pipeline/run_pipeline.py` coordinates these stages and contains **no smell-specific
+logic**. Adding a smell means adding a detector in `pipeline/detectors/` and a spec in
+`pipeline/smells.py` — the orchestrator, the LLM agents and the API need no changes.
+
+Every stage isolates errors: a failing extractor, a failing detector or a failing LLM call
+for one finding is recorded on the result and the run continues with the rest. Nothing is
+swallowed silently.
+
 ## Repository layout
 
 ```
-pipeline/         Steps 2-5, 7 (extractor, graph analysis, LLM agents, logging)
-api/              Read-only FastAPI layer over logs/ for the frontend (see Dashboard)
-frontend/         Vite + React + TypeScript dashboard (see Dashboard)
-tests/            pytest suite, one file per pipeline module
-target-repo/      cloned target repo (gitignored — see Setup)
-logs/             logs/edges_current.json (sample) + logs/runs/ (per-run stage logs)
-IGNORE/           reference docs only (PRD) — never commit generated output here
-CLAUDE.md         full phased implementation guide
+pipeline/            orchestrator, models, config, smell specs, repository acquisition
+pipeline/extractors/ evidence collectors: rest, docker, persistence
+pipeline/detectors/  one module per smell + the registry
+api/                 FastAPI layer for the frontend: reads logs/, starts runs (see Dashboard)
+frontend/            Vite + React + TypeScript dashboard (see Dashboard)
+tests/               pytest suite
+target-repo/         the Phase 1 target repository
+workspace/           repositories cloned by URL (gitignored, cleaned up after each run)
+logs/                logs/edges_current.json (sample) + logs/runs/ (per-run stage logs)
+IGNORE/              reference docs only (PRD) — never commit generated output here
+CLAUDE.md            full phased implementation guide
 ```
+
+## Running the pipeline
+
+```bash
+# A local repository (no network, no API key with --no-llm)
+python -m pipeline.run_pipeline target-repo --no-llm
+
+# A Git repository by URL, on a specific branch
+python -m pipeline.run_pipeline https://github.com/owner/repo.git --branch main
+
+# Choose detectors, name the run, keep the clone for inspection
+python -m pipeline.run_pipeline https://github.com/owner/repo \
+    --smells cyclic_dependency shared_persistence \
+    --run-name experiment-3 --keep-clone --output result.json
+```
+
+| Flag | Effect |
+|---|---|
+| `--branch` | Branch to check out (Git URLs only) |
+| `--smells` | Subset of `cyclic_dependency`, `hub_dependency`, `shared_persistence` |
+| `--no-llm` | Deterministic detection only; makes no API calls |
+| `--run-name` | Label for the run log directory under `logs/runs/` |
+| `--output` | Also write the unified result JSON to this path |
+| `--keep-clone` | Keep a cloned repository instead of deleting it after the run |
+
+The Phase 1 single-step commands still work unchanged:
+
+```bash
+python -m pipeline.extractor target-repo -o logs/edges_current.json
+python -m pipeline.graph_analysis logs/edges_current.json
+python -m pipeline.llm_detection logs/edges_current.json --repo-root target-repo
+python -m pipeline.llm_refactoring logs/edges_current.json --repo-root target-repo
+```
+
+## Configuration
+
+All thresholds live in [`pipeline/config.py`](pipeline/config.py) rather than inside
+detectors, so a run can state exactly which parameters produced it (they are written to
+`00_run_metadata.json` on every run). The main ones:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `hub.min_degree` | 4 | Absolute floor before a service can be a hub at all |
+| `hub.stdev_multiplier` | 1.5 | Outlier test: `degree >= mean + k*stdev` |
+| `hub.degree_ratio` | 0.5 | Share test: connected to this fraction of other services |
+| `hub.degree_mode` | `total` | `total`, `in`, or `out` degree |
+| `shared_persistence.in_memory_drivers` | hsqldb, h2, derby, sqlite | Never reported as shared |
+| `shared_persistence.report_table_overlap_without_datasource` | `True` | Enables the weak table-name rule |
+| `excluded_edge_sources` | `docker-compose` | Edge sources kept out of the graph |
+| `repository.clone_depth` / `max_repo_size_mb` | 1 / 1024 | Clone limits |
+| `llm.min_finding_confidence` | 0.0 | Skip weak findings before spending tokens |
+
+## Tests
+
+```bash
+python -m pytest tests/ -q          # whole suite, no network and no API key required
+python -m pytest tests/test_run_pipeline.py -q   # end-to-end orchestrator
+```
+
+Every LLM call and every `git clone` is mocked in the suite, so it runs offline.
+
+## Known limitations
+
+These are real boundaries of the current implementation, not oversights:
+
+- **REST only.** gRPC and message-queue (Kafka/RabbitMQ/JMS) communication are invisible to
+  the extractor, so a system built on them will appear to have no dependencies at all. This
+  is a stated scope boundary in the PRD, not a temporary gap.
+- **Regex, not AST.** A call assembled dynamically so that no `"http://<service>"` literal
+  ever appears in the source will be missed.
+- **Java/Spring Boot/Maven layout.** Services are discovered from top-level Maven modules
+  with `pom.xml` and `spring.application.name`. Gradle projects, nested module layouts and
+  non-Spring stacks are not supported.
+- **Externalized configuration is invisible.** If datasource config lives in Spring Cloud
+  Config, environment variables or Kubernetes secrets (as it does in the Phase 1 target
+  repo), Shared Persistence has nothing to analyze and correctly reports nothing. Absence of
+  evidence is reported as absence, never as "no sharing".
+- **Shared Persistence cannot prove physical sharing.** Identical database names may be
+  different instances per environment; identical table names may be unrelated tables. The
+  detector reports confidence accordingly and the LLM is told to treat it as a ceiling.
+- **Temporal coupling is not implemented.** Neither the PRD nor CLAUDE.md defines it, and
+  establishing it requires runtime call-ordering data (traces) that static analysis cannot
+  produce. Implementing it as a static heuristic would mean claiming runtime behaviour was
+  observed when it was not.
+- **No private repositories.** Only public `https://` clones are supported; credential
+  prompts are disabled so a private URL fails fast instead of hanging.
+- **Refactoring is a proposal only.** The agent never edits code (CLAUDE.md Step 6 remains
+  manual).
 
 ## Dashboard
 
-A dashboard visualizes what the pipeline already produces on disk: an interactive Service
-Dependency Graph (`/graph`, hand-laid-out SVG — services that only appear in docker-compose
-`depends_on` are drawn as muted infra nodes, real call edges are solid, cycle edges are
-highlighted), the Step 4 detection verdict and Step 5 refactoring proposal with their full
-LLM reasoning traces (`/detection`, `/refactoring`), and the run log history (`/runs`). It's
-read-only for now: it renders `logs/edges_current.json` and `logs/runs/*/*.json`, it doesn't
-trigger pipeline runs (there's no orchestrator to call yet — see Issue #3 below).
+The dashboard both **starts** analyses and visualizes their results.
+
+**Running one (`/analyze`).** Pick a repository — the bundled `target-repo`, or any public
+HTTPS Git URL with an optional branch — then either run a full analysis or search the detector
+catalogue and select specific smells, and choose whether to include LLM validation. The page
+then shows the run's real progress: a station-by-station view of the orchestrator's own stages
+(acquire → extract → detect → validate → refactor), each one appearing as the pipeline actually
+writes it to disk, alongside a live stage log. Nothing about the progress is simulated —
+`api/jobs.py` subclasses the pipeline's `RunLogger`, so a station lights up only when that
+stage has completed. When the run finishes it links straight to the full run log.
+
+**Reading results.** `/detection` lists every finding of the latest run, of any smell, showing
+the deterministic detector's severity/confidence and the LLM's verdict side by side (the model
+never overwrites what static analysis measured), with the evidence and full reasoning trace
+behind each. `/refactoring` shows the proposed plans, `/graph` renders the Service Dependency
+Graph of any selected run (hand-laid-out SVG — docker-compose-only services are drawn as muted
+infra nodes, real call edges solid, cycle edges highlighted), and `/runs` is the history.
 
 - `api/main.py` is a thin FastAPI layer that reuses `pipeline.graph_analysis` directly rather
   than re-deriving cycle detection in JS. Run from the repo root: `python -m uvicorn api.main:app
   --reload --port 8000`.
+- `api/jobs.py` runs one analysis at a time on a background thread. The repository source is
+  validated before it reaches the pipeline: Git URLs go through `pipeline.repository`'s existing
+  strict validator, and local paths are confined to the project directory, so the endpoint
+  cannot be used to read arbitrary directories on the machine.
 - `frontend/` is a Vite + React + TypeScript SPA (Tailwind v4, hand-built SVG graph, no chart/graph
   library). Vite's dev server proxies `/api` to `127.0.0.1:8000` (not `localhost` — on hosts
   where Node resolves `localhost` to `::1` only, that mismatches uvicorn's IPv4-only bind and
   every request 502s). `cd frontend && npm install && npm run dev`, then open the printed
   `localhost:5173` URL.
 - `npm test` in `frontend/` runs a small Vitest suite covering the graph layout's node
-  classification and cycle-edge separation logic.
+  classification and cycle-edge separation logic, and the run-log stage lookup by finding key.
 
 ## Setup
 
@@ -138,119 +321,58 @@ trigger pipeline runs (there's no orchestrator to call yet — see Issue #3 belo
    FastAPI/uvicorn for the dashboard's API).
 2. Copy `.env.example` to `.env` and fill in your own `NVIDIA_API_KEY` (free tier at
    https://build.nvidia.com) — required for Steps 4-5. `.env` is gitignored; never commit it.
-3. Clone the target repo yourself — it is **not** part of this git history:
-   ```
-   git clone https://github.com/spring-petclinic/spring-petclinic-microservices.git target-repo
-   ```
-   This gives you the *unmodified* upstream repo. To get the same synthetic cyclic-dependency
-   fixture the existing run logs were produced against, see **Current Issue #2** below — until
-   Developer A's task lands, you'll need to recreate `target-repo/FIXTURE_NOTES.md`'s changes
-   by hand.
-4. Run tests: `python -m pytest tests/ -q`.
-5. For the dashboard: see **Dashboard** above.
+3. `target-repo/` is already committed, including the synthetic cyclic-dependency fixture the
+   run logs were produced against — nothing to clone. Analyzing any other repository needs no
+   setup either: pass its URL to `pipeline.run_pipeline` and it is cloned into `workspace/`.
+4. Run tests: `python -m pytest tests/ -q` (no network or API key needed).
+5. Run the pipeline: see **Running the pipeline** above.
+6. For the dashboard: see **Dashboard** above.
 
 ---
 
 ## Current issues
 
-1. **Flaky test** — `tests/test_llm_refactoring.py::test_run_proposes_refactoring_when_recommended`
-   fails intermittently (reproduced locally: `1 failed, 33 passed`). `networkx.simple_cycles()`
-   returns a 2-node cycle starting at whichever node its traversal hits first — e.g.
-   `['a', 'b', 'a']` on one run, `['b', 'a', 'b']` on another — and the test hardcodes one
-   specific rotation. This isn't a bug in the code path under test, but the underlying output
-   genuinely isn't deterministic today, which also undermines Step 7's reproducibility goal for
-   real runs. **Fix needed in `detect_cycles()` itself** (canonicalize each cycle to a stable
-   rotation), not just in the test. Assigned to Developer B below.
+1. ~~**Flaky test / non-deterministic cycles.**~~ **Fixed.** `detect_cycles()` now
+   canonicalizes every cycle to start at its lexicographically smallest node (rotation only,
+   direction preserved) and sorts the result, so the same graph always produces byte-identical
+   output regardless of NetworkX's traversal order. Covered by
+   `tests/test_detectors_cyclic.py::test_equivalent_rotations_produce_identical_output`.
 
-2. **Fixture is not reproducible by teammates.** `target-repo/` is correctly excluded from this
-   repo's git history (it's a full external clone with its own `.git`), but that also means the
-   synthetic cyclic dependency the Step 4/5 logs above were produced against — currently
-   uncommitted, local-only changes on `target-repo`'s `thesis/phase1-cyclic-dependency-fixture`
-   branch — exists on one machine only. No one else can currently reproduce Steps 2-6 against
-   the same evidence. Needs to be exported as a patch file committed into this repo. Assigned to
-   Developer A below.
+2. ~~**Fixture is not reproducible by teammates.**~~ **Resolved differently than planned.**
+   `target-repo/` (including the synthetic cyclic-dependency fixture and
+   `FIXTURE_NOTES.md`) is now committed directly into this repository rather than exported as
+   a patch, so a fresh clone reproduces the exact tree the run logs were produced against.
 
-3. **No single command runs the full pipeline.** Steps 2, 4, and 5 each have their own
-   `argparse` `main()` and must be invoked separately, passing the edges JSON between them by
-   hand (`python -m pipeline.extractor target-repo -o edges.json`, then
-   `python -m pipeline.llm_refactoring edges.json --repo-root target-repo`, ...). Assigned to
-   Developer B below.
+3. ~~**No single command runs the full pipeline.**~~ **Fixed.**
+   `python -m pipeline.run_pipeline <repo>` runs acquisition → extraction → all detectors →
+   LLM validation → refactoring → logging in one command.
 
-4. **Per-teammate API keys.** Steps 4-5 require a live `NVIDIA_API_KEY`; each developer needs
-   their own in their own local `.env` (never shared via git) before those steps will run.
+4. **Per-teammate API keys.** The LLM stages require a live `NVIDIA_API_KEY`; each developer
+   needs their own in their own local `.env` (never shared via git). Everything except the LLM
+   stages runs without one — use `--no-llm`.
+
+5. **Analyses started from the dashboard live in the server process.** `api/jobs.py` keeps
+   jobs in memory and runs one at a time, so a restart loses in-flight progress (the run log
+   on disk survives) and a multi-worker deployment would not share job state. That is the
+   right size for a single-user research dashboard; a real queue is only worth it if runs ever
+   need to outlive the server.
 
 ---
 
-## Next steps — split for 3 people working in parallel
+## Next steps
 
-The three workstreams below touch almost entirely disjoint files, so all three can be branched
-from `main` and developed simultaneously with minimal merge conflicts. The only file two
-workstreams both touch is `pipeline/graph_analysis.py` (Developer B only) — Developer C should
-add a *new* file rather than editing it, to stay out of Developer B's way.
+The Phase 1 three-way split (Developers A/B/C) is complete: cycle canonicalization, the
+single-command orchestrator and the Hub-like Dependency detector all landed, and the target
+repository is now committed rather than needing a patch file.
 
-### Developer A — Close out Step 6 + fix Issue #2 (fixture reproducibility)
-**Branch:** `feature/step6-verify-fixture`
+Remaining, in rough priority order:
 
-1. On `target-repo`, branch off `thesis/phase1-cyclic-dependency-fixture` and manually apply
-   the Step 5 plan (remove `VisitsServiceClient.getVisitCount` and its call sites from
-   `customers-service`, per
-   [`step5_refactoring_customers-service_visits-service.json`](logs/runs/20260914T180118Z_step5-refactoring/step5_refactoring_customers-service_visits-service.json)).
-2. Run `mvn test`; confirm it's still green.
-3. Re-run the extractor (`pipeline/extractor.py`) and cycle detector
-   (`pipeline/graph_analysis.py`) against the modified code; confirm the
-   `customers-service <-> visits-service` cycle no longer appears.
-4. Record the before/after result (tests pass? cycle gone?) as a new entry under
-   `logs/runs/` or a short report — this is Phase 1's final accept/reject decision.
-5. **Fix Issue #2:** export the fixture as `git diff` against upstream `main`, committed into
-   *this* repo as `fixtures/petclinic-cyclic-dependency.patch`, with a short
-   `fixtures/README.md` giving the two-command apply recipe. This lets any teammate regenerate
-   the exact same `target-repo` state from a clean clone.
-
-**Files touched:** `target-repo/` (untracked by this repo — zero conflict risk with B/C), new
-`fixtures/`, `logs/runs/`.
-
-### Developer B — Fix Issue #1 (flaky test) + Issue #3 (single pipeline runner)
-**Branch:** `feature/canonicalize-cycles-and-runner`
-
-1. In `pipeline/graph_analysis.py`, canonicalize each cycle in `detect_cycles()` to a stable
-   rotation (e.g. start at the lexicographically smallest node) before returning, so output is
-   deterministic regardless of `networkx`'s internal traversal order.
-2. Update the affected assertions in `tests/test_graph_analysis.py` and
-   `tests/test_llm_refactoring.py`; add a regression test that feeds the same cycle in two
-   different rotations and asserts identical canonicalized output.
-3. Add a single orchestrator entry point (e.g. `pipeline/run_pipeline.py`) chaining
-   extractor → graph/cycle detection → LLM detection → LLM refactoring → logging behind one
-   command, taking just a repo path — replacing the current need to invoke four separate
-   `python -m pipeline.X` commands and pass JSON between them by hand.
-4. Add tests for the new entry point and a short usage note.
-
-**Files touched:** `pipeline/graph_analysis.py`, `tests/test_graph_analysis.py`,
-`tests/test_llm_refactoring.py`, new `pipeline/run_pipeline.py` + its test.
-
-### Developer C — Phase 2 kickoff: Hub-like Dependency detector
-**Branch:** `feature/hub-like-dependency-detector`
-
-The first Phase 2+ item from CLAUDE.md ("Hub-like Dependency detector — degree/centrality
-threshold on the same SDG"), additive and independent of the Cyclic Dependency code path.
-
-1. Add a hub-like dependency detector as a **new module**, `pipeline/hub_detection.py`
-   (reuses `build_graph()` from `pipeline/graph_analysis.py` but doesn't modify it): flag any
-   service whose in-/out-degree (or centrality) exceeds a configurable threshold.
-2. Add an LLM detection agent for this smell mirroring `pipeline/llm_detection.py`'s pattern
-   (new smell definition + system prompt; reuse `code_context.py`, `llm_client.py`,
-   `json_utils.py` as-is for evidence formatting, calling the LLM, and JSON parsing/retry).
-3. Add tests mirroring `tests/test_graph_analysis.py` / `tests/test_llm_detection.py`'s
-   structure.
-4. Document known limitations of the degree/centrality approach in the module docstring,
-   matching the style of `extractor.py`'s docstring.
-
-**Files touched:** new `pipeline/hub_detection.py`, new `pipeline/llm_hub_detection.py`, new
-`tests/test_hub_detection.py`, `tests/test_llm_hub_detection.py`.
-
-### Merging back to `main`
-
-- Run `python -m pytest tests/ -q` before opening each PR.
-- Suggested merge order: **B first** (it fixes the flaky-test baseline everyone else's CI runs
-  against), then **A** and **C** in either order — their file sets don't overlap with each
-  other or with B's `graph_analysis.py` change beyond the shared `build_graph()`/`detect_cycles()`
-  functions, which only B modifies.
+1. **Step 6 — apply & verify.** Apply a proposed refactoring to `target-repo`, run `mvn test`,
+   and re-run the pipeline to confirm the finding disappears. This is Phase 1's final
+   accept/reject gate and is still manual. Automating it (branch → patch → compile → test →
+   re-detect) is the natural follow-up.
+2. **Evaluation corpus.** Run the pipeline across several repositories and label the findings
+   to get precision/recall per smell, which is what the thesis's measurement chapter needs.
+3. **Phase 2+ items from CLAUDE.md** not yet started: RAG over large services, LangGraph
+   orchestration with bounded retries, cross-validation against Arcan/MSANose/DesigniteJava,
+   EvoSuite regression tests, MLflow tracking.

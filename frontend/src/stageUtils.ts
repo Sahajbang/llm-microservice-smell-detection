@@ -29,3 +29,22 @@ export function refactoringStages(run: RunDetail | null | undefined): [string, R
     (entry): entry is [string, RefactoringStage] => isRefactoringStage(entry[1]),
   )
 }
+
+/** Mirror of `pipeline.run_logger._slugify`, which turns a stage name into a
+ *  filename. Finding keys contain a ':' that becomes '-' on disk, so a
+ *  lookup by raw key would never match. */
+function slugify(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'run'
+}
+
+/** The LLM traces a multi-smell run logged for one finding, if it has any.
+ *  The orchestrator names these `detection_<key>` / `refactoring_<key>`. */
+export function detectionStageFor(run: RunDetail | null | undefined, key: string): DetectionStage | undefined {
+  const value = run?.stages[slugify(`detection_${key}`)]
+  return isDetectionStage(value) ? value : undefined
+}
+
+export function refactoringStageFor(run: RunDetail | null | undefined, key: string): RefactoringStage | undefined {
+  const value = run?.stages[slugify(`refactoring_${key}`)]
+  return isRefactoringStage(value) ? value : undefined
+}

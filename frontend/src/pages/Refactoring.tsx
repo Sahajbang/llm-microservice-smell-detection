@@ -5,7 +5,9 @@ import { LoadingBlock, ErrorBlock, EmptyBlock } from '../components/States'
 import { StatusPill } from '../components/Badges'
 import { CyclePath } from '../components/CyclePath'
 import { ReasoningTrace } from '../components/ReasoningTrace'
-import { refactoringStages } from '../stageUtils'
+import { FindingCard } from '../components/FindingCard'
+import { RunContextBar } from './Detection'
+import { detectionStageFor, refactoringStageFor, refactoringStages } from '../stageUtils'
 import type { RefactoringStage } from '../types'
 
 export function RefactoringCard({ stage }: { stage: RefactoringStage }) {
@@ -69,8 +71,9 @@ export function Refactoring() {
     <div className="mx-auto max-w-7xl px-6 py-12">
       <h1 className="text-3xl font-semibold tracking-tight text-text">Refactoring</h1>
       <p className="mt-3 max-w-2xl text-text-secondary">
-        Step 5 &mdash; given a confirmed cycle, the refactoring agent proposes the minimal scope-limited change that
-        breaks it. Every file it names is checked against the services in the cycle before acceptance.
+        For every confirmed finding, the refactoring agent proposes the minimal scope-limited change that addresses
+        it. Each file it names is checked against the services in the finding before the plan is accepted. Proposals
+        are never applied automatically.
       </p>
 
       {state.status === 'loading' && (
@@ -87,12 +90,37 @@ export function Refactoring() {
       {state.status === 'ready' && (
         <div className="mt-10">
           {(() => {
-            const stages = refactoringStages(state.data)
+            const run = state.data
+            if (run?.summary.kind === 'pipeline') {
+              const proposed = run.summary.findings.filter((f) => f.refactoring)
+              return (
+                <div className="space-y-6">
+                  <RunContextBar run={run} />
+                  {proposed.length === 0 ? (
+                    <EmptyBlock
+                      title="No refactoring proposed in the latest run"
+                      body="A plan is requested only for findings the LLM both confirmed and recommended refactoring for. Runs with LLM validation disabled never reach this stage."
+                    />
+                  ) : (
+                    proposed.map((f) => (
+                      <FindingCard
+                        key={f.key}
+                        finding={f}
+                        detectionStage={detectionStageFor(run, f.key)}
+                        refactoringStage={refactoringStageFor(run, f.key)}
+                      />
+                    ))
+                  )}
+                </div>
+              )
+            }
+
+            const stages = refactoringStages(run)
             if (stages.length === 0) {
               return (
                 <EmptyBlock
                   title="No refactoring proposal logged yet"
-                  body="Run pipeline/llm_refactoring.py against a confirmed cycle to produce a step5_refactoring_*.json entry under logs/runs/."
+                  body="Start a run with LLM validation enabled from the New analysis page to produce a refactoring plan."
                 />
               )
             }

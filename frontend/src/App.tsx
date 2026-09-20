@@ -6,6 +6,7 @@ import { Detection } from './pages/Detection'
 import { Refactoring } from './pages/Refactoring'
 import { Runs } from './pages/Runs'
 import { RunDetail } from './pages/RunDetail'
+import { Analyze } from './pages/Analyze'
 
 export default function App() {
   return (
@@ -14,6 +15,8 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/" element={<Overview />} />
+          <Route path="/analyze" element={<Analyze />} />
+          <Route path="/analyze/:jobId" element={<Analyze />} />
           <Route path="/graph" element={<GraphPage />} />
           <Route path="/detection" element={<Detection />} />
           <Route path="/refactoring" element={<Refactoring />} />

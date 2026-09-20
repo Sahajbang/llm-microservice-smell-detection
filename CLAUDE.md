@@ -159,7 +159,25 @@ Scope for Phase 1: **one smell (Cyclic Dependency)**, **one repository**, grep-b
 
 Only proceed here once Steps 1–7 run end-to-end successfully on at least one repo.
 
-- **Hub-like Dependency detector** — degree/centrality threshold on the same SDG.
+**Already landed** (see README.md for usage and limitations):
+
+- ✅ **Hub-like Dependency detector** — implemented in `pipeline/detectors/hub_dependency.py`
+  using an absolute degree floor combined with a statistical-outlier test and a
+  connectivity-share test on the same SDG, all thresholds configurable in `pipeline/config.py`.
+- ✅ **Repository-agnostic input** — `pipeline/repository.py` accepts a Git URL or a local
+  path; Steps 2–7 no longer assume `target-repo/`.
+- ✅ **Pipeline orchestrator** — `pipeline/run_pipeline.py` runs acquisition → extraction →
+  all detectors → LLM validation → refactoring → logging in one command, with per-stage error
+  isolation.
+- ✅ **Pluggable multi-smell architecture** — detector registry (`pipeline/detectors/`) plus a
+  smell-spec registry (`pipeline/smells.py`) that drives per-smell prompts, so adding a smell
+  requires no change to the orchestrator or the LLM agents.
+- ✅ **Shared Persistence detector** — beyond the two smells this document scopes, added on
+  request. Detects services sharing a database/schema/tables from datasource config, JPA
+  `@Table` declarations and SQL schema/migration files. Its provenance (not PRD scope) is
+  recorded in `pipeline/smells.py` and README.md.
+
+**Still outstanding:**
 - **Automated patch application** — replace manual git apply in Step 6 with a programmatic patch applier + compiler/test runner wrapper.
 - **RAG layer (chunking → CodeBERT embeddings → FAISS)** — only once a single implicated service's relevant code no longer fits comfortably in one prompt, or once testing spans multiple repos where relevance can't be hand-verified. The SDG continues to do coarse filtering first; FAISS ranks within that already-narrowed scope.
 - **LangGraph orchestration** — wrap the Detection → Refactoring → Verification sequence with retry logic, once the underlying logic is stable and doesn't need debugging at the same time as the framework.

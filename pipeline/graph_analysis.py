@@ -11,6 +11,15 @@ default: they encode container startup ordering, not the request-flow
 coupling that "Cyclic Dependency" as an architectural smell is about. They
 remain available in the full edge list for context. Pass
 `exclude_sources=set()` to include them.
+
+Cycles are canonicalized before being returned. `networkx.simple_cycles`
+reports a cycle starting at whichever node its traversal reached first, so
+the same cycle could be reported as ["a", "b", "a"] on one run and
+["b", "a", "b"] on the next. Rotating each cycle to start at its
+lexicographically smallest node (direction preserved -- never reversed)
+makes the output stable across runs, which the run logs depend on for
+reproducibility and which keeps equivalent rotations from being counted as
+distinct findings.
 """
 
 from __future__ import annotations
@@ -46,17 +55,41 @@ def build_graph(
     return graph
 
 
+def canonicalize_cycle(cycle: list[str]) -> list[str]:
+    """Rotate an open cycle to start at its lexicographically smallest node.
+
+    Direction is preserved: only rotation is applied, never reversal, so
+    a -> b -> c stays a -> b -> c and does not become a -> c -> b (which
+    would be a different dependency structure).
+
+    Accepts either an open cycle (["b", "a"]) or a closed one
+    (["b", "a", "b"]) and always returns the open form.
+    """
+    if not cycle:
+        return []
+    nodes = cycle[:-1] if len(cycle) > 1 and cycle[0] == cycle[-1] else list(cycle)
+    if not nodes:
+        return []
+    start = min(range(len(nodes)), key=lambda i: nodes[i])
+    return nodes[start:] + nodes[:start]
+
+
 def detect_cycles(graph: nx.DiGraph) -> list[dict]:
     """Return one {"smell": "Cyclic Dependency", "cycle": [...]} per cycle found.
 
     `cycle` is the closed path (first node repeated at the end), matching
     the shape documented in CLAUDE.md Step 3, e.g.
     ["order-service", "payment-service", "order-service"].
+
+    Each cycle is canonicalized (see `canonicalize_cycle`) and the list is
+    sorted, so the same graph always produces byte-identical output
+    regardless of NetworkX's internal traversal order.
     """
     results = []
     for cycle in nx.simple_cycles(graph):
-        closed = cycle + [cycle[0]]
-        results.append({"smell": "Cyclic Dependency", "cycle": closed})
+        nodes = canonicalize_cycle(cycle)
+        results.append({"smell": "Cyclic Dependency", "cycle": nodes + [nodes[0]]})
+    results.sort(key=lambda r: (len(r["cycle"]), r["cycle"]))
     return results
 
 

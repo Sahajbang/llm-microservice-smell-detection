@@ -4,25 +4,30 @@
   --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
 
-  --color-bg: #0a0a0c;
-  --color-bg-elevated: #141417;
-  --color-bg-elevated-2: #1c1c20;
-  --color-border: #29292f;
-  --color-border-subtle: #1c1c20;
+  /* Matte black. Elevated surfaces step up from it rather than the page
+     stepping down from pure black, so panels read as material, not voids. */
+  --color-bg: #28282b;
+  --color-bg-elevated: #2f2f33;
+  --color-bg-elevated-2: #37373c;
+  --color-bg-sunken: #232326;
+  --color-border: #46464d;
+  --color-border-subtle: #37373c;
 
+  /* Secondary/tertiary text lifted to stay legible against the lighter
+     background (the old values were tuned for #0a0a0c). */
   --color-text: #edeef0;
-  --color-text-secondary: #a3a3ad;
-  --color-text-tertiary: #6b6b76;
+  --color-text-secondary: #b0b0ba;
+  --color-text-tertiary: #8a8a94;
 
   --color-accent: #4fd1ff;
-  --color-accent-dim: #1c4c5c;
+  --color-accent-dim: #1e4654;
 
-  --color-danger: #f43f5e;
-  --color-danger-dim: #3f1420;
-  --color-warning: #f59e0b;
-  --color-warning-dim: #3f2e0a;
-  --color-ok: #34d399;
-  --color-ok-dim: #0f3b2c;
+  --color-danger: #ff6b85;
+  --color-danger-dim: #46202c;
+  --color-warning: #f5b23b;
+  --color-warning-dim: #453317;
+  --color-ok: #4ade9e;
+  --color-ok-dim: #17402f;
 }
 
 html {
@@ -55,6 +60,84 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-border);
+}
+
+/* --- Analysis progress screen -------------------------------------------
+   The progress view mirrors the orchestrator's real stage sequence, so it
+   gets purpose-built motion rather than a generic spinner: signal travels
+   down a conduit between stations, and the active station pulses. */
+
+@keyframes conduit-travel {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 -28px;
+  }
+}
+
+@keyframes station-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+@keyframes event-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.conduit {
+  background-image: linear-gradient(
+    to bottom,
+    var(--color-accent) 0 8px,
+    transparent 8px 14px
+  );
+  background-size: 2px 14px;
+  background-repeat: repeat-y;
+  animation: conduit-travel 0.7s linear infinite;
+}
+
+.station-active {
+  animation: station-pulse 1.6s ease-out infinite;
+}
+
+.sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 33%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-accent) 12%, transparent),
+    transparent
+  );
+  animation: sweep 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.event-in {
+  animation: event-in 0.25s ease-out both;
 }
 
 @media (prefers-reduced-motion: reduce) {

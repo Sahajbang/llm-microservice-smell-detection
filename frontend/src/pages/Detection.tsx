@@ -6,9 +6,11 @@ import { SeverityBadge, StatusPill } from '../components/Badges'
 import { CyclePath } from '../components/CyclePath'
 import { CodeEvidence } from '../components/CodeEvidence'
 import { ReasoningTrace } from '../components/ReasoningTrace'
-import { detectionStages } from '../stageUtils'
-import type { DetectionStage } from '../types'
+import { FindingCard } from '../components/FindingCard'
+import { detectionStageFor, detectionStages, refactoringStageFor } from '../stageUtils'
+import type { DetectionStage, RunDetail } from '../types'
 
+/** Phase 1 run shape: one cycle, one detection call, no finding registry. */
 export function DetectionCard({ stage }: { stage: DetectionStage }) {
   const { result } = stage
   return (
@@ -42,6 +44,48 @@ export function DetectionCard({ stage }: { stage: DetectionStage }) {
   )
 }
 
+/** Findings from a multi-smell orchestrator run, any smell, newest run only. */
+export function FindingsList({ run, showRefactoring }: { run: RunDetail; showRefactoring?: boolean }) {
+  return (
+    <div className="space-y-6">
+      {run.summary.findings.map((f) => (
+        <FindingCard
+          key={f.key}
+          finding={f}
+          detectionStage={detectionStageFor(run, f.key)}
+          refactoringStage={showRefactoring ? refactoringStageFor(run, f.key) : undefined}
+          showRefactoring={showRefactoring}
+        />
+      ))}
+    </div>
+  )
+}
+
+export function RunContextBar({ run }: { run: RunDetail }) {
+  const { summary } = run
+  const repo = summary.repository
+  return (
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-border bg-bg-elevated/40 px-5 py-3">
+      <span className="font-mono text-xs text-text">
+        {repo ? repo.name : summary.label}
+        {repo?.branch && <span className="text-text-tertiary">@{repo.branch}</span>}
+      </span>
+      <span className="font-mono text-[11px] text-text-tertiary">{summary.timestamp}</span>
+      {summary.detectorsRun.length > 0 && (
+        <span className="font-mono text-[11px] text-text-tertiary">
+          detectors: {summary.detectorsRun.join(', ')}
+        </span>
+      )}
+      {summary.llmEnabled === false && (
+        <span className="font-mono text-[11px] text-warning">LLM validation was disabled for this run</span>
+      )}
+      <Link to={`/runs/${summary.id}`} className="ml-auto text-xs text-accent hover:underline">
+        Full run log &rarr;
+      </Link>
+    </div>
+  )
+}
+
 export function Detection() {
   const state = useFetch(api.latestRunDetail, [])
 
@@ -49,8 +93,8 @@ export function Detection() {
     <div className="mx-auto max-w-7xl px-6 py-12">
       <h1 className="text-3xl font-semibold tracking-tight text-text">Detection</h1>
       <p className="mt-3 max-w-2xl text-text-secondary">
-        Step 4 &mdash; one LLM call per candidate cycle, grounded in the code evidence for each hop, asked to confirm
-        whether the cycle is a genuine architectural problem and explain why.
+        Deterministic detectors propose candidates from the extracted evidence; the LLM then judges each candidate
+        against the code behind it. Both verdicts are kept — the model never overwrites what static analysis measured.
       </p>
 
       {state.status === 'loading' && (
@@ -67,12 +111,33 @@ export function Detection() {
       {state.status === 'ready' && (
         <div className="mt-10">
           {(() => {
-            const stages = detectionStages(state.data)
+            const run = state.data
+            if (run?.summary.kind === 'pipeline') {
+              if (run.summary.findings.length === 0) {
+                return (
+                  <div className="space-y-6">
+                    <RunContextBar run={run} />
+                    <EmptyBlock
+                      title="No smells detected in the latest run"
+                      body="Every enabled detector ran and none produced a candidate. That is a result, not a failure — try another repository from the New analysis page."
+                    />
+                  </div>
+                )
+              }
+              return (
+                <div className="space-y-6">
+                  <RunContextBar run={run} />
+                  <FindingsList run={run} showRefactoring={false} />
+                </div>
+              )
+            }
+
+            const stages = detectionStages(run)
             if (stages.length === 0) {
               return (
                 <EmptyBlock
                   title="No detection run logged yet"
-                  body="Run pipeline/llm_detection.py against a candidate cycle to produce a step4_detection_*.json entry under logs/runs/."
+                  body="Start a run from the New analysis page, or run python -m pipeline.run_pipeline target-repo from the repo root."
                 />
               )
             }

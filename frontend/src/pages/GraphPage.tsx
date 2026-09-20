@@ -50,16 +50,42 @@ function EdgeGroup({ title, edges, direction }: { title: string; edges: Edge[]; 
 }
 
 export function GraphPage() {
-  const state = useFetch(api.graph, [])
+  const runs = useFetch(api.runs, [])
+  // Default to the newest orchestrator run, so a repository analyzed by URL
+  // shows its own graph -- those clones are deleted after the run, and
+  // logs/edges_current.json only ever holds the local target repo.
+  const [runId, setRunId] = useState<string | null>(null)
+  const pipelineRuns = runs.status === 'ready' ? runs.data.filter((r) => r.kind === 'pipeline') : []
+  const effectiveRunId = runId ?? pipelineRuns[0]?.id ?? null
+
+  const state = useFetch(() => api.graph(effectiveRunId ?? undefined), [effectiveRunId])
   const [selected, setSelected] = useState<string | null>(null)
 
   return (
     <div className="mx-auto max-w-7xl px-6 py-12">
       <h1 className="text-3xl font-semibold tracking-tight text-text">Dependency graph</h1>
       <p className="mt-3 max-w-2xl text-text-secondary">
-        Nodes are services discovered from Maven module names; edges are call sites the Step 2 extractor matched.
-        Click a service to inspect its calls and the code evidence behind each edge.
+        Nodes are services discovered from module names; edges are call sites the extractor matched. Click a service
+        to inspect its calls and the code evidence behind each edge.
       </p>
+
+      {pipelineRuns.length > 0 && (
+        <label className="mt-6 inline-flex items-center gap-3">
+          <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">Graph from run</span>
+          <select
+            value={effectiveRunId ?? ''}
+            onChange={(e) => setRunId(e.target.value)}
+            className="rounded-md border border-border bg-bg-sunken px-3 py-1.5 font-mono text-xs text-text outline-none focus:border-accent/60"
+          >
+            {pipelineRuns.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.repository?.name ?? r.label} — {r.timestamp}
+              </option>
+            ))}
+            <option value="">Phase 1 extractor snapshot</option>
+          </select>
+        </label>
+      )}
 
       {state.status === 'loading' && (
         <div className="mt-10">

@@ -3,10 +3,57 @@ import { Link, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { LoadingBlock, ErrorBlock } from '../components/States'
-import { DetectionCard } from './Detection'
+import { DetectionCard, FindingsList } from './Detection'
 import { RefactoringCard } from './Refactoring'
 import { detectionStages, refactoringStages } from '../stageUtils'
 import type { RunDetail as RunDetailData } from '../types'
+
+function RunHeader({ run }: { run: RunDetailData }) {
+  const { summary } = run
+  const repo = summary.repository
+  return (
+    <>
+      <h1 className="font-mono text-2xl text-text">{repo?.name ?? summary.label}</h1>
+      <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-xs text-text-tertiary">
+        <span>{summary.timestamp}</span>
+        {repo && (
+          <span>
+            {repo.kind}
+            {repo.branch ? ` · ${repo.branch}` : ''}
+            {repo.commit ? ` · ${repo.commit.slice(0, 10)}` : ''}
+          </span>
+        )}
+        {repo?.remote_url && <span className="truncate">{repo.remote_url}</span>}
+        {summary.detectorsRun.length > 0 && <span>detectors: {summary.detectorsRun.join(', ')}</span>}
+        {summary.llmEnabled === false && <span className="text-warning">LLM disabled</span>}
+      </div>
+      {summary.counts && (
+        <div className="mt-6 grid grid-cols-2 divide-x divide-border-subtle rounded-lg border border-border sm:grid-cols-4">
+          {[
+            ['Findings', summary.counts.findings],
+            ['Confirmed by LLM', summary.counts.confirmed_by_llm],
+            ['Refactoring plans', summary.counts.refactoring_proposals],
+            ['Errors', summary.counts.errors],
+          ].map(([label, value]) => (
+            <div key={label as string} className="px-5 py-4">
+              <div className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{label}</div>
+              <div className="mt-1 font-mono text-2xl text-text">{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {summary.errors.length > 0 && (
+        <ul className="mt-4 space-y-1">
+          {summary.errors.map((e, i) => (
+            <li key={i} className="rounded-md border border-warning/30 bg-warning-dim px-3 py-2 text-xs text-warning">
+              <span className="font-mono uppercase">{e.stage}/{e.component}</span> {e.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  )
+}
 
 export function RunDetail() {
   const { id = '' } = useParams()
@@ -31,16 +78,21 @@ export function RunDetail() {
 
       {state.status === 'ready' && (
         <div className="mt-4">
-          <h1 className="font-mono text-2xl text-text">{state.data.label}</h1>
-          <p className="mt-1 font-mono text-sm text-text-tertiary">{state.data.timestamp}</p>
+          <RunHeader run={state.data} />
 
           <div className="mt-10 space-y-6">
-            {detectionStages(state.data).map(([key, stage]) => (
-              <DetectionCard key={key} stage={stage} />
-            ))}
-            {refactoringStages(state.data).map(([key, stage]) => (
-              <RefactoringCard key={key} stage={stage} />
-            ))}
+            {state.data.summary.kind === 'pipeline' ? (
+              <FindingsList run={state.data} showRefactoring />
+            ) : (
+              <>
+                {detectionStages(state.data).map(([key, stage]) => (
+                  <DetectionCard key={key} stage={stage} />
+                ))}
+                {refactoringStages(state.data).map(([key, stage]) => (
+                  <RefactoringCard key={key} stage={stage} />
+                ))}
+              </>
+            )}
             <OtherStages runDetail={state.data} />
           </div>
         </div>
