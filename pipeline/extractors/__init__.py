@@ -69,6 +69,27 @@ def collect_evidence(repo_root: Path | str, config: Optional[AnalysisConfig] = N
         bundle.modules = modules
 
     _guard(bundle, "service_discovery", _discover)
+    if not modules:
+        # Not an exception -- discovery ran fine and legitimately found
+        # nothing. That is indistinguishable, downstream, from "this
+        # repository has no smells" unless it is said explicitly: every
+        # detector depends on services/edges that can only come from a
+        # module discover_services recognized (pom.xml, or build.gradle /
+        # build.gradle.kts -- see its docstring for what is NOT recognized).
+        # An empty result here almost always means the build tool wasn't
+        # recognized, not that the repository is clean.
+        bundle.errors.append(
+            PipelineError(
+                stage=STAGE_EXTRACTION,
+                component="service_discovery",
+                message=(
+                    "No services discovered: no top-level directory has a pom.xml or a "
+                    "build.gradle/build.gradle.kts with a resolvable service name. All "
+                    "detectors will report zero findings as a result -- that reflects a gap "
+                    "in module discovery, not a verified absence of smells."
+                ),
+            )
+        )
 
     rest_edges: list = []
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Check, FolderOpen, GitBranch, MagnifyingGlass, Play } from '@phosphor-icons/react'
-import { api } from '../api'
+import { Check, FolderOpen, GitBranch, MagnifyingGlass, Play, Warning } from '@phosphor-icons/react'
+import { api, ApiError } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { ErrorBlock, LoadingBlock } from '../components/States'
 import { AnalysisProgress } from '../components/AnalysisProgress'
@@ -10,16 +10,24 @@ import type { Job, SmellCatalog, SmellSpec } from '../types'
 
 const POLL_MS = 1200
 
-/** Poll one job until it stops running. */
-function useJob(jobId: string | undefined): { job: Job | null; error: string | null } {
+/** Poll one job until it stops running.
+ *
+ * A 404 is permanent, not a network blip: the job registry lives in the
+ * API's memory (see api/jobs.py), so it is wiped by any server restart —
+ * including uvicorn's own --reload firing on a source-file change while a
+ * run is in flight. Retrying that forever would spam the server and leave
+ * the last-seen progress frozen on screen; `gone` short-circuits polling and
+ * lets the UI show a real "start over" state instead. */
+function useJob(jobId: string | undefined): { job: Job | null; error: string | null; gone: boolean } {
   const [job, setJob] = useState<Job | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [gone, setGone] = useState(false)
 
   useEffect(() => {
-    if (!jobId) {
-      setJob(null)
-      return
-    }
+    setJob(null)
+    setError(null)
+    setGone(false)
+    if (!jobId) return
     let cancelled = false
     let timer: number | undefined
 
@@ -32,6 +40,10 @@ function useJob(jobId: string | undefined): { job: Job | null; error: string | n
         if (next.status === 'running') timer = window.setTimeout(tick, POLL_MS)
       } catch (err) {
         if (cancelled) return
+        if (err instanceof ApiError && err.status === 404) {
+          setGone(true)
+          return
+        }
         setError(err instanceof Error ? err.message : String(err))
         timer = window.setTimeout(tick, POLL_MS * 4)
       }
@@ -43,7 +55,7 @@ function useJob(jobId: string | undefined): { job: Job | null; error: string | n
     }
   }, [jobId])
 
-  return { job, error }
+  return { job, error, gone }
 }
 
 function SourceCard({
@@ -370,7 +382,7 @@ export function Analyze() {
   const { jobId } = useParams()
   const navigate = useNavigate()
   const catalog = useFetch(api.smells, [])
-  const { job, error } = useJob(jobId)
+  const { job, error, gone } = useJob(jobId)
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-12">
@@ -382,7 +394,27 @@ export function Analyze() {
 
       <div className="mt-10">
         {jobId ? (
-          job ? (
+          gone ? (
+            <div className="flex flex-col items-start gap-4 rounded-lg border border-warning/30 bg-warning-dim px-5 py-4">
+              <div className="flex gap-3 text-sm text-warning">
+                <Warning size={18} weight="bold" className="mt-0.5 shrink-0" />
+                <p>
+                  This run is no longer tracked by the server — most likely it restarted (for example, a dev-mode
+                  <code className="mx-1 font-mono text-xs">--reload</code>
+                  triggered by a source change) while the analysis was in progress. The partial run log, if any, is
+                  still on disk under <span className="font-mono text-text">logs/runs/</span>, but its live progress
+                  cannot be recovered.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/analyze')}
+                className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
+              >
+                Start another analysis
+              </button>
+            </div>
+          ) : job ? (
             <AnalysisProgress
               job={job}
               phases={catalog.status === 'ready' ? catalog.data.phases : []}

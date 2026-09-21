@@ -7,6 +7,7 @@ import { CyclePath } from '../components/CyclePath'
 import { CodeEvidence } from '../components/CodeEvidence'
 import { ReasoningTrace } from '../components/ReasoningTrace'
 import { FindingCard } from '../components/FindingCard'
+import { RunErrors } from './Overview'
 import { detectionStageFor, detectionStages, refactoringStageFor } from '../stageUtils'
 import type { DetectionStage, RunDetail } from '../types'
 
@@ -117,9 +118,18 @@ export function Detection() {
                 return (
                   <div className="space-y-6">
                     <RunContextBar run={run} />
+                    <RunErrors errors={run.summary.errors} />
                     <EmptyBlock
-                      title="No smells detected in the latest run"
-                      body="Every enabled detector ran and none produced a candidate. That is a result, not a failure — try another repository from the New analysis page."
+                      title={
+                        run.summary.errors.length > 0
+                          ? 'No findings — see the error above'
+                          : 'No smells detected in the latest run'
+                      }
+                      body={
+                        run.summary.errors.length > 0
+                          ? 'One or more pipeline stages failed, so this result does not confirm the repository is free of smells.'
+                          : 'Every enabled detector ran and none produced a candidate. That is a result, not a failure — try another repository from the New analysis page.'
+                      }
                     />
                   </div>
                 )
@@ -127,6 +137,7 @@ export function Detection() {
               return (
                 <div className="space-y-6">
                   <RunContextBar run={run} />
+                  <RunErrors errors={run.summary.errors} />
                   <FindingsList run={run} showRefactoring={false} />
                 </div>
               )

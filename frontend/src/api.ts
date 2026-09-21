@@ -1,5 +1,16 @@
 import type { GraphResponse, Job, Overview, RunDetail, RunSummary, SmellCatalog } from './types'
 
+/** Carries the HTTP status so callers can tell a permanent failure (404: this
+ *  resource is gone) from a transient one (network blip, 5xx) worth retrying. */
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
   if (!res.ok) {
@@ -9,7 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       .json()
       .then((b: { detail?: string }) => b?.detail)
       .catch(() => undefined)
-    throw new Error(detail ?? `${path} responded ${res.status}`)
+    throw new ApiError(detail ?? `${path} responded ${res.status}`, res.status)
   }
   return res.json() as Promise<T>
 }

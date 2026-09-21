@@ -16,18 +16,46 @@ function Stat({ label, value, tone }: { label: string; value: string | number; t
   )
 }
 
+/** A pipeline-stage error (e.g. no services discovered) makes "0 findings"
+ *  mean something different from a clean bill of health, so it is shown
+ *  ahead of the empty/found state rather than only buried in the run log. */
+export function RunErrors({ errors }: { errors: RunSummary['errors'] }) {
+  if (errors.length === 0) return null
+  return (
+    <div className="space-y-2">
+      {errors.map((e, i) => (
+        <div key={i} className="rounded-lg border border-warning/30 bg-warning-dim px-4 py-3 text-sm text-warning">
+          <span className="font-mono text-xs uppercase tracking-wide">
+            {e.stage}/{e.component}
+          </span>
+          <p className="mt-1 text-warning/90">{e.message}</p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function LatestFindings({ run }: { run: RunSummary }) {
   if (run.findings.length === 0) {
     return (
-      <EmptyBlock
-        title="No smells detected in the latest run"
-        body="Every enabled detector ran and produced no candidate. Analyze another repository to compare."
-      />
+      <div className="space-y-4">
+        <RunErrors errors={run.errors} />
+        <EmptyBlock
+          title={run.errors.length > 0 ? 'No findings — see the error above' : 'No smells detected in the latest run'}
+          body={
+            run.errors.length > 0
+              ? 'One or more pipeline stages failed, so this result does not confirm the repository is free of smells.'
+              : 'Every enabled detector ran and produced no candidate. Analyze another repository to compare.'
+          }
+        />
+      </div>
     )
   }
   return (
-    <div className="divide-y divide-border-subtle rounded-lg border border-border">
-      {run.findings.map((f) => (
+    <div className="space-y-4">
+      <RunErrors errors={run.errors} />
+      <div className="divide-y divide-border-subtle rounded-lg border border-border">
+        {run.findings.map((f) => (
         <Link
           key={f.key}
           to={`/runs/${run.id}`}
@@ -47,7 +75,8 @@ function LatestFindings({ run }: { run: RunSummary }) {
             </span>
           </div>
         </Link>
-      ))}
+        ))}
+      </div>
     </div>
   )
 }

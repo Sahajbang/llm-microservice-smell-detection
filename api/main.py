@@ -20,12 +20,21 @@ packages, same convention as the test suite:
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+# pipeline.llm_client also calls this, but only gets imported once a job
+# actually starts (api/jobs.py imports pipeline.run_pipeline lazily inside
+# its background thread). /api/smells needs NVIDIA_API_KEY visible before
+# that ever happens, so load .env here too rather than depending on import
+# order.
+load_dotenv()
 
 from api import jobs
 from pipeline.config import ALL_DETECTORS, default_config
@@ -226,8 +235,6 @@ def get_run(run_id: str) -> dict:
 @app.get("/api/smells")
 def get_smells() -> dict:
     """Which detectors can be selected, and whether LLM validation is available."""
-    import os
-
     return {
         "smells": [
             {

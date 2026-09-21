@@ -118,6 +118,43 @@ def test_discover_services_reads_application_name(synthetic_repo: Path):
     }
 
 
+def _write_gradle_module(root: Path, module_name: str, *, application_name: str | None = None) -> None:
+    module_dir = root / module_name
+    module_dir.mkdir(parents=True, exist_ok=True)
+    (module_dir / "build.gradle").write_text("plugins { id 'org.springframework.boot' }\n", encoding="utf-8")
+    if application_name:
+        resources = module_dir / "src" / "main" / "resources"
+        resources.mkdir(parents=True, exist_ok=True)
+        (resources / "application.properties").write_text(
+            f"spring.application.name={application_name}\n", encoding="utf-8"
+        )
+
+
+def test_discover_services_recognizes_gradle_modules(tmp_path: Path):
+    """A repository with no pom.xml anywhere (e.g. microsoft/PartsUnlimitedMRPmicro)
+    must not be treated as having zero modules just because it uses Gradle."""
+    _write_gradle_module(tmp_path, "CatalogSrvc", application_name="catalog-catalogservice")
+    services = discover_services(tmp_path)
+    assert services == {"CatalogSrvc": "catalog-catalogservice"}
+
+
+def test_discover_services_gradle_module_without_application_name_falls_back_to_dir_name(tmp_path: Path):
+    """Gradle has no artifactId equivalent to fall back to; a standalone module
+    (no settings.gradle) defaults to its own directory name under Gradle itself,
+    so mirroring that is more honest than inventing a name or skipping it."""
+    _write_gradle_module(tmp_path, "RestAPIGateway")
+    assert discover_services(tmp_path) == {"RestAPIGateway": "RestAPIGateway"}
+
+
+def test_discover_services_ignores_non_java_modules(tmp_path: Path):
+    """A .csproj-only directory (e.g. PartsUnlimitedMRPmicro's DealerService) has
+    no pom.xml or build.gradle and must stay invisible, not crash or get guessed."""
+    module_dir = tmp_path / "DealerService"
+    module_dir.mkdir(parents=True)
+    (module_dir / "DealerService.csproj").write_text("<Project />", encoding="utf-8")
+    assert discover_services(tmp_path) == {}
+
+
 def test_extract_all_finds_every_pattern(synthetic_repo: Path):
     edges = extract_all(synthetic_repo)
     pairs = {(e["caller"], e["callee"], e["source"]) for e in edges}

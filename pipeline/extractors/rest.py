@@ -32,8 +32,11 @@ Known limitations (documented rather than solved, per project scope):
     comment).
   - gRPC and message-queue-based inter-service communication are entirely
     out of scope for this extractor, as stated in the PRD (Section 8).
-  - A call's "caller" is always the top-level Maven module (directory
-    directly under the repo root) that contains the source file.
+  - A call's "caller" is always the top-level module (a directory directly
+    under the repo root with a ``pom.xml`` or a ``build.gradle``/
+    ``build.gradle.kts``) that contains the source file. A repository using
+    neither build tool, or nesting modules more than one level deep, is
+    invisible to this extractor -- see ``discover_services``.
 """
 
 from __future__ import annotations
@@ -90,14 +93,31 @@ _ARTIFACT_ID_RE = re.compile(r"<artifactId>\s*([\w.-]+)\s*</artifactId>")
 
 
 def discover_services(repo_root: Path) -> dict[str, str]:
-    """Return {module_dir_name: service_name} for every top-level Maven module."""
+    """Return {module_dir_name: service_name} for every top-level module.
+
+    A module is recognized by a Maven or a Gradle build descriptor at its
+    root (``pom.xml``, or ``build.gradle``/``build.gradle.kts``). Either way
+    the declared Spring ``spring.application.name`` is preferred, since that
+    is the name the service actually calls itself over REST/discovery.
+    Absent that:
+      - Maven falls back to the module's ``<artifactId>`` (a real declared
+        identifier).
+      - Gradle falls back to the module directory's own name. Unlike Maven,
+        a standalone Gradle module (no multi-project ``settings.gradle``)
+        has no other declared identifier -- Gradle itself defaults an
+        unnamed project to its containing directory name, so this mirrors
+        Gradle's own convention rather than inventing one.
+    """
     repo_root = Path(repo_root)
     services: dict[str, str] = {}
     for module_dir in sorted(p for p in repo_root.iterdir() if p.is_dir()):
         pom = module_dir / "pom.xml"
-        if not pom.exists():
+        if pom.exists():
+            name = _find_application_name(module_dir) or _find_artifact_id(pom)
+        elif (module_dir / "build.gradle").exists() or (module_dir / "build.gradle.kts").exists():
+            name = _find_application_name(module_dir) or module_dir.name
+        else:
             continue
-        name = _find_application_name(module_dir) or _find_artifact_id(pom)
         if name:
             services[module_dir.name] = name
     return services

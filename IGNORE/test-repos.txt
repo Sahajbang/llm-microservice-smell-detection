@@ -1,0 +1,30 @@
+Yes. The best verified repository I found is:
+
+- [devdcores/BookStoreApp-Distributed-Application](https://github.com/devdcores/BookStoreApp-Distributed-Application)  
+  Your app found:
+  - 1 hub candidate: `bookstore-feign` connects to five services.
+  - 2 shared-persistence findings: five services use the same MySQL database, `bookstore_db`, under local and Docker profiles.
+  
+  Important: `bookstore-feign` is a shared Feign-client module, not clearly a deployed microservice. This makes it an excellent test case for the deterministic hub detector and LLM validation: the detector flags its high coupling correctly, while the LLM should likely judge whether that coupling is actually harmful.
+
+  Result: [detection log](E:/tarp-project/logs/runs/20260920T194742Z_devdcores-all-smells/02_detection.json)
+
+- [sumedhahire/spring-boot-eureka-grpc-feign-simplified](https://github.com/sumedhahire/spring-boot-eureka-grpc-feign-simplified)  
+  Your app confirmed 1 shared-persistence finding: `order-service` and `product-services` both use `jdbc:mysql://localhost:3306/microservice`.
+
+  Result: [detection log](E:/tarp-project/logs/runs/20260920T194643Z_sumedhahire-shared/02_detection.json)
+
+For a guaranteed cyclic-dependency positive test, use your bundled `target-repo`. It intentionally contains:
+
+```text
+customers-service → visits-service
+visits-service    → customers-service
+```
+
+Run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.run_pipeline target-repo --smells cyclic_dependency --no-llm
+```
+
+I did not find and verify a separate public repository with a real HTTP/Feign cycle that your current extractor detects. Several repositories describe “bidirectional” services but actually communicate through gRPC, events, or unsupported patterns, so your tool correctly finds no cycle.
