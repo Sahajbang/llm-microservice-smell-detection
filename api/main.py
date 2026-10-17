@@ -86,6 +86,7 @@ def _flatten_findings(result: dict) -> list[dict]:
                 **finding,
                 "llmDetection": entry.get("llm_detection"),
                 "refactoring": entry.get("refactoring"),
+                "patch": entry.get("patch"),
                 "errors": entry.get("errors") or [],
             }
         )
@@ -115,6 +116,7 @@ def _summarize_run(run_dir: Path) -> dict:
         "findings": [],
         "detectorsRun": [],
         "llmEnabled": None,
+        "refactor": None,
         "errors": [],
     }
     for f in sorted(run_dir.glob("*.json")):
@@ -131,6 +133,7 @@ def _summarize_run(run_dir: Path) -> dict:
                     "findings": _flatten_findings(data),
                     "detectorsRun": data.get("detectors_run") or [],
                     "llmEnabled": data.get("llm_enabled"),
+                    "refactor": data.get("refactor"),
                     "errors": data.get("errors") or [],
                 }
             )
@@ -155,18 +158,20 @@ def _list_runs() -> list[dict]:
     return [_summarize_run(d) for d in run_dirs]
 
 
-def _graph_payload(edges: list[dict]) -> dict:
+def _graph_payload(edges: list[dict], services: Optional[list[str]] = None) -> dict:
+    """`services` keeps modules with no extracted edges on the graph; without it,
+    only edge endpoints are known."""
     graph = build_graph(edges)
-    services = sorted({e["caller"] for e in edges} | {e["callee"] for e in edges})
-    return {"services": services, "edges": edges, "cycles": detect_cycles(graph)}
+    names = set(services or []) | {e["caller"] for e in edges} | {e["callee"] for e in edges}
+    return {"services": sorted(names), "edges": edges, "cycles": detect_cycles(graph)}
 
 
-def _run_edges(run_id: str) -> list[dict]:
-    """Dependency edges as extracted by one run (its 01_evidence stage)."""
+def _run_evidence(run_id: str) -> tuple[list[dict], list[str]]:
+    """Dependency edges and every discovered service, as extracted by one run (its 01_evidence stage)."""
     evidence = _read_json(_run_dir(run_id) / "01_evidence.json")
     if not isinstance(evidence, dict):
         raise HTTPException(status_code=404, detail="run has no extracted evidence")
-    return list(evidence.get("dependencies") or [])
+    return list(evidence.get("dependencies") or []), list(evidence.get("services") or [])
 
 
 # --- read-only endpoints -----------------------------------------------------
@@ -181,7 +186,7 @@ def get_graph(run: Optional[str] = None) -> dict:
     only way to see the graph of a repository analyzed by URL, since those
     clones are deleted after the run.
     """
-    return _graph_payload(_run_edges(run) if run else _load_edges())
+    return _graph_payload(*_run_evidence(run)) if run else _graph_payload(_load_edges())
 
 
 @app.get("/api/overview")
@@ -191,12 +196,15 @@ def get_overview() -> dict:
     # Prefer the latest pipeline run's own graph over the standalone
     # extractor snapshot, so the dashboard reflects the last analysis.
     edges = _load_edges()
+    services: list[str] = []
     if latest and latest["kind"] == "pipeline":
         try:
-            edges = _run_edges(latest["id"]) or edges
+            run_edges, run_services = _run_evidence(latest["id"])
+            if run_edges or run_services:
+                edges, services = run_edges, run_services
         except HTTPException:
             pass
-    graph = _graph_payload(edges)
+    graph = _graph_payload(edges, services)
     source_breakdown: dict[str, int] = {}
     for e in edges:
         source_breakdown[e["source"]] = source_breakdown.get(e["source"], 0) + 1
@@ -259,6 +267,9 @@ class AnalyzeRequest(BaseModel):
     llm: bool = True
     branch: Optional[str] = None
     runName: str = "dashboard"
+    applyMode: str = Field("never", description="never | dry-run | ask | auto")
+    onFailure: str = Field("rollback", description="rollback | keep")
+    verifyLevel: str = Field("compile", description="none | compile | test")
 
 
 @app.post("/api/analyze", status_code=202)
@@ -270,6 +281,9 @@ def start_analysis(req: AnalyzeRequest) -> dict:
             llm=req.llm,
             branch=req.branch,
             run_name=req.runName or "dashboard",
+            apply_mode=req.applyMode,
+            on_failure=req.onFailure,
+            verify_level=req.verifyLevel,
         )
     except jobs.JobError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -292,4 +306,24 @@ def get_job(job_id: str) -> dict:
     job = jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    return job.to_dict()
+
+
+class DecisionRequest(BaseModel):
+    decisionId: str
+    answer: str
+
+
+@app.post("/api/jobs/{job_id}/decision")
+def answer_decision(job_id: str, req: DecisionRequest) -> dict:
+    """Answer the question an ``ask``-mode run is blocked on (see api/jobs.py)."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    try:
+        job.answer(req.decisionId, req.answer)
+    except jobs.StaleDecision as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return job.to_dict()

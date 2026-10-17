@@ -38,6 +38,16 @@ STAGE_DETECTION = "detection"
 STAGE_LLM_DETECTION = "llm_detection"
 STAGE_LLM_REFACTORING = "llm_refactoring"
 STAGE_REPOSITORY = "repository"
+STAGE_APPLY = "apply"
+
+# Lifecycle of a generated patch (FindingResult.patch["status"]).
+#   proposed     generated, not applied (dry-run)
+#   rejected     a human declined it
+#   verified     applied, built, smell gone -> committed to the refactor branch
+#   rolled_back  applied, failed verification, reverted
+#   failed_kept  applied, failed verification, committed anyway (marked unverified)
+#   error        could not be generated or applied
+PATCH_STATUSES = ("proposed", "rejected", "verified", "rolled_back", "failed_kept", "error")
 
 
 @dataclass
@@ -70,6 +80,7 @@ DEPENDENCY_SOURCE_CONFIDENCE: dict[str, float] = {
     "webclient": 0.9,
     "discovery-client": 0.85,
     "http-literal": 0.6,
+    "gateway-route": 0.8,
     "docker-compose": 0.4,
 }
 DEFAULT_DEPENDENCY_CONFIDENCE = 0.5
@@ -237,6 +248,7 @@ class FindingResult:
     finding: Finding
     llm_detection: Optional[dict[str, Any]] = None
     refactoring: Optional[dict[str, Any]] = None
+    patch: Optional[dict[str, Any]] = None  # see PATCH_STATUSES
     errors: list[PipelineError] = field(default_factory=list)
 
     @property
@@ -248,6 +260,7 @@ class FindingResult:
             "finding": self.finding.to_dict(),
             "llm_detection": self.llm_detection,
             "refactoring": self.refactoring,
+            "patch": self.patch,
             "errors": [e.to_dict() for e in self.errors],
         }
 
@@ -270,9 +283,13 @@ class AnalysisResult:
     results: list[FindingResult] = field(default_factory=list)
     errors: list[PipelineError] = field(default_factory=list)
     llm_enabled: bool = True
+    # Autonomous-refactoring summary (mode, branch, commits); None when the
+    # run only proposed changes.
+    refactor: Optional[dict[str, Any]] = None
 
     def counts(self) -> dict[str, Any]:
         by_smell: dict[str, int] = {}
+        patches: dict[str, int] = {}
         confirmed = 0
         refactorings = 0
         for r in self.results:
@@ -281,13 +298,18 @@ class AnalysisResult:
                 confirmed += 1
             if r.refactoring:
                 refactorings += 1
-        return {
+            if r.patch:
+                patches[r.patch["status"]] = patches.get(r.patch["status"], 0) + 1
+        counts = {
             "findings": len(self.results),
             "findings_by_smell": by_smell,
             "confirmed_by_llm": confirmed,
             "refactoring_proposals": refactorings,
             "errors": len(self.errors) + sum(len(r.errors) for r in self.results),
         }
+        if self.refactor is not None:
+            counts["patches_by_status"] = patches
+        return counts
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -301,6 +323,7 @@ class AnalysisResult:
             "graph_summary": self.graph_summary,
             "counts": self.counts(),
             "results": [r.to_dict() for r in self.results],
+            "refactor": self.refactor,
             "errors": [e.to_dict() for e in self.errors],
         }
 

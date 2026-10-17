@@ -1,4 +1,14 @@
-import type { GraphResponse, Job, Overview, RunDetail, RunSummary, SmellCatalog } from './types'
+import type {
+  ApplyMode,
+  FailurePolicy,
+  GraphResponse,
+  Job,
+  Overview,
+  RunDetail,
+  RunSummary,
+  SmellCatalog,
+  VerifyLevel,
+} from './types'
 
 /** Carries the HTTP status so callers can tell a permanent failure (404: this
  *  resource is gone) from a transient one (network blip, 5xx) worth retrying. */
@@ -31,6 +41,9 @@ export interface AnalyzeRequest {
   llm?: boolean
   branch?: string | null
   runName?: string
+  applyMode?: ApplyMode
+  onFailure?: FailurePolicy
+  verifyLevel?: VerifyLevel
 }
 
 export const api = {
@@ -53,5 +66,11 @@ export const api = {
       body: JSON.stringify(body),
     }),
   job: (id: string) => request<Job>(`/api/jobs/${encodeURIComponent(id)}`),
+  decide: (jobId: string, decisionId: string, answer: string) =>
+    request<Job>(`/api/jobs/${encodeURIComponent(jobId)}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisionId, answer }),
+    }),
   jobs: () => request<{ active: Job | null; recent: Job[] }>('/api/jobs'),
 }

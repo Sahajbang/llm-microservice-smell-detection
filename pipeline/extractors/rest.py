@@ -53,7 +53,7 @@ from pipeline.models import DEFAULT_DEPENDENCY_CONFIDENCE, DEPENDENCY_SOURCE_CON
 class Edge:
     caller: str
     callee: str
-    source: str  # "feign" | "resttemplate" | "webclient" | "discovery-client" | "http-literal" | "docker-compose"
+    source: str  # "feign" | "resttemplate" | "webclient" | "discovery-client" | "http-literal" | "gateway-route" | "docker-compose"
     file: str  # path relative to repo root, forward-slash separated
     line: int  # 1-indexed; 0 for edges with no single source line (docker-compose)
     evidence: str  # the matched snippet / line, trimmed
@@ -168,6 +168,14 @@ _HTTP_LITERAL_RE = re.compile(r'https?://([a-zA-Z][\w-]*)')
 _RESTTEMPLATE_HINT_RE = re.compile(r"restTemplate\s*\.", re.IGNORECASE)
 _WEBCLIENT_HINT_RE = re.compile(r"WebClient|RestClient")
 
+_PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+_INTERFACE_RE = re.compile(r"\binterface\s+(\w+)")
+
+# Gateway routes declared in config: Zuul ``serviceId``/``service-id`` and
+# Spring Cloud Gateway ``lb://service`` URIs.
+_GATEWAY_ROUTE_RE = re.compile(r"(?:\bservice-?[iI]d\s*[:=]\s*|\blb(?:-ws)?://)([\w.-]+)")
+_CONFIG_GLOBS = ("application*.yml", "application*.yaml", "application*.properties", "bootstrap*.yml", "bootstrap*.yaml", "bootstrap*.properties")
+
 
 def _feign_target(annotation_args: str) -> Optional[str]:
     m = _FEIGN_NAMED_ARG_RE.search(annotation_args)
@@ -202,11 +210,19 @@ def scan_java_file(
     rel_path = path.relative_to(repo_root).as_posix()
     edges: list[Edge] = []
 
+    package = _PACKAGE_RE.search(text)
     for m in _FEIGN_RE.finditer(text):
         target = _feign_target(m.group(1))
         if target and target in all_services and target != caller_service:
             line_no = _line_number(text, m.start())
-            edges.append(make_edge(caller_service, target, "feign", rel_path, line_no, m.group(0).strip()))
+            iface = _INTERFACE_RE.search(text, m.end())
+            client = f"{package.group(1)}.{iface.group(1)}" if package and iface else None
+            edges.append(
+                make_edge(
+                    caller_service, target, "feign", rel_path, line_no, m.group(0).strip(),
+                    **({"client": client} if client else {}),
+                )
+            )
 
     for m in _DISCOVERY_CLIENT_RE.finditer(text):
         target = m.group(1)
@@ -242,13 +258,89 @@ def extract_rest_edges(repo_root: Path, module_to_service: Optional[dict[str, st
     all_services = set(module_to_service.values())
 
     edges: list[Edge] = []
+    sources: dict[str, list[Path]] = {}
     for module_dir_name, caller_service in module_to_service.items():
+        edges.extend(scan_gateway_routes(repo_root / module_dir_name, caller_service, all_services, repo_root))
         java_src = repo_root / module_dir_name / "src" / "main" / "java"
         if not java_src.exists():
             continue
-        for java_file in java_src.rglob("*.java"):
+        sources[caller_service] = sorted(java_src.rglob("*.java"))
+        for java_file in sources[caller_service]:
             edges.extend(scan_java_file(java_file, caller_service, all_services, repo_root))
+    return attribute_shared_feign_clients(edges, sources, repo_root)
+
+
+def scan_gateway_routes(module_dir: Path, caller_service: str, all_services: set[str], repo_root: Path) -> list[Edge]:
+    """Routes a gateway module declares in its Spring config files."""
+    resources = module_dir / "src" / "main" / "resources"
+    if not resources.is_dir():
+        return []
+    edges: list[Edge] = []
+    for pattern in _CONFIG_GLOBS:
+        for cfg in sorted(resources.glob(pattern)):
+            rel_path = cfg.relative_to(repo_root).as_posix()
+            for line_no, line in enumerate(cfg.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                for m in _GATEWAY_ROUTE_RE.finditer(line):
+                    target = m.group(1)
+                    if target in all_services and target != caller_service:
+                        edges.append(make_edge(caller_service, target, "gateway-route", rel_path, line_no, line.strip()))
     return edges
+
+
+def attribute_shared_feign_clients(
+    edges: list[Edge], sources: dict[str, list[Path]], repo_root: Path
+) -> list[Edge]:
+    """Credit a Feign client declared in a shared library module to the modules that use it.
+
+    The library only declares the interface; the service that imports and
+    injects it is the one making the call. A client nobody else references
+    stays attributed to its declaring module (the usual in-module case).
+    """
+    texts: dict[Path, str] = {}
+
+    def text_of(path: Path) -> str:
+        if path not in texts:
+            texts[path] = path.read_text(encoding="utf-8", errors="ignore")
+        return texts[path]
+
+    result: list[Edge] = []
+    for edge in edges:
+        client = edge.metadata.get("client") if edge.source == "feign" else None
+        if not client:
+            result.append(edge)
+            continue
+        package, _, name = client.rpartition(".")
+        uses = re.compile(rf"\bimport\s+{re.escape(client)}\s*;|\b{re.escape(client)}\b")
+        wildcard = re.compile(rf"\bimport\s+{re.escape(package)}\.\*\s*;")
+        simple = re.compile(rf"\b{re.escape(name)}\b")
+        users: list[Edge] = []
+        for service, files in sources.items():
+            if service in (edge.caller, edge.callee):
+                continue
+            for path in files:
+                text = text_of(path)
+                if not (uses.search(text) or (wildcard.search(text) and simple.search(text))):
+                    continue
+                lines = text.splitlines()
+                line_no = next(
+                    (i for i, ln in enumerate(lines, 1) if simple.search(ln) and not ln.lstrip().startswith("import")),
+                    next(i for i, ln in enumerate(lines, 1) if name in ln),
+                )
+                users.append(
+                    make_edge(
+                        service,
+                        edge.callee,
+                        "feign",
+                        path.relative_to(repo_root).as_posix(),
+                        line_no,
+                        lines[line_no - 1].strip(),
+                        client=client,
+                        declared_in=f"{edge.file}:{edge.line}",
+                    )
+                )
+                break
+        result.extend(users or [edge])
+    return result
 
 
 def edges_to_dicts(edges: list[Edge]) -> list[dict]:

@@ -181,6 +181,57 @@ def test_extract_all_ignores_self_references(tmp_path: Path):
     assert edges == []
 
 
+def test_feign_client_in_shared_library_is_credited_to_its_users(tmp_path: Path):
+    """A library module that only declares the client interface is not the caller;
+    the service that imports and injects it is (e.g. BookStoreApp's bookstore-feign)."""
+    _write_module(
+        tmp_path,
+        "shared-feign",
+        "shared-feign",
+        {
+            "com/acme/feign/AccountFeignClient.java": (
+                "package com.acme.feign;\n"
+                '@FeignClient("account-service")\n'
+                "public interface AccountFeignClient {}\n"
+            )
+        },
+    )
+    _write_module(tmp_path, "account-mod", "account-service", {"A.java": "class A {}\n"})
+    _write_module(
+        tmp_path,
+        "order-mod",
+        "order-service",
+        {
+            "OrderServiceImpl.java": (
+                "import com.acme.feign.AccountFeignClient;\n"
+                "class OrderServiceImpl {\n"
+                "  AccountFeignClient accountFeignClient;\n"
+                "}\n"
+            )
+        },
+    )
+    edges = extract_all(tmp_path)
+    feign = [e for e in edges if e["source"] == "feign"]
+    assert [(e["caller"], e["callee"]) for e in feign] == [("order-service", "account-service")]
+    assert feign[0]["file"] == "order-mod/src/main/java/OrderServiceImpl.java"
+    assert feign[0]["line"] == 3
+    assert feign[0]["metadata"]["declared_in"].startswith("shared-feign/")
+
+
+def test_gateway_routes_in_config_become_edges(tmp_path: Path):
+    _write_module(tmp_path, "account-mod", "account-service", {})
+    _write_module(tmp_path, "order-mod", "order-service", {})
+    _write_module(tmp_path, "gateway-mod", "gateway", {})
+    (tmp_path / "gateway-mod/src/main/resources/application.yml").write_text(
+        "spring:\n  application:\n    name: gateway\n"
+        "zuul:\n  routes:\n    account:\n      serviceId: account-service\n"
+        "spring.cloud.gateway.routes:\n  - uri: lb://order-service\n",
+        encoding="utf-8",
+    )
+    pairs = {(e["caller"], e["callee"], e["source"]) for e in extract_all(tmp_path)}
+    assert pairs == {("gateway", "account-service", "gateway-route"), ("gateway", "order-service", "gateway-route")}
+
+
 @pytest.mark.skipif(not TARGET_REPO.exists(), reason="target-repo/ not present")
 def test_target_repo_ground_truth():
     """Locks in the manually-verified edge set for the Phase 1 target repo."""
@@ -197,7 +248,16 @@ def test_target_repo_ground_truth():
     }
     assert expected <= pairs
 
-    # No other non-docker-compose edges should have been found -- this repo
-    # was fully read by hand and these six are the whole real+fixture set.
-    non_compose = {p for p in pairs if p[2] != "docker-compose"}
-    assert non_compose == expected
+    # No other code-level edges should have been found -- this repo was fully
+    # read by hand and these six are the whole real+fixture set.
+    code_level = {p for p in pairs if p[2] not in ("docker-compose", "gateway-route")}
+    assert code_level == expected
+
+    # The gateway's four Spring Cloud Gateway `lb://` routes in its application.yml.
+    routes = {(c, t) for c, t, s in pairs if s == "gateway-route"}
+    assert routes == {
+        ("api-gateway", "vets-service"),
+        ("api-gateway", "visits-service"),
+        ("api-gateway", "customers-service"),
+        ("api-gateway", "genai-service"),
+    }

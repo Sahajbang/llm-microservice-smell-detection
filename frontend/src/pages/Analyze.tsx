@@ -6,7 +6,7 @@ import { useFetch } from '../hooks/useFetch'
 import { ErrorBlock, LoadingBlock } from '../components/States'
 import { AnalysisProgress } from '../components/AnalysisProgress'
 import { cn } from '../lib/cn'
-import type { Job, SmellCatalog, SmellSpec } from '../types'
+import type { ApplyMode, FailurePolicy, Job, SmellCatalog, SmellSpec, VerifyLevel } from '../types'
 
 const POLL_MS = 1200
 
@@ -217,6 +217,63 @@ function SmellPicker({
   )
 }
 
+/** A small single-choice group: one bordered button per option. */
+function Choice<T extends string>({
+  label,
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  label: string
+  value: T
+  onChange: (v: T) => void
+  options: { value: T; title: string; body: string }[]
+  disabled?: boolean
+}) {
+  return (
+    <fieldset disabled={disabled} className="disabled:opacity-50">
+      <legend className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{label}</legend>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {options.map((o) => {
+          const on = o.value === value
+          return (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => onChange(o.value)}
+              aria-pressed={on}
+              className={cn(
+                'rounded-md border p-3 text-left transition-colors disabled:cursor-not-allowed',
+                on ? 'border-accent/50 bg-accent-dim/20' : 'border-border hover:border-accent/30',
+              )}
+            >
+              <span className="block text-sm font-medium text-text">{o.title}</span>
+              <span className="mt-1 block text-[12px] leading-relaxed text-text-secondary">{o.body}</span>
+            </button>
+          )
+        })}
+      </div>
+    </fieldset>
+  )
+}
+
+const APPLY_OPTIONS: { value: ApplyMode; title: string; body: string }[] = [
+  { value: 'never', title: 'Propose only', body: 'Stop at the refactoring plan. Nothing is generated or written.' },
+  { value: 'dry-run', title: 'Preview patches', body: 'Generate the actual code change as a diff, but write nothing.' },
+  { value: 'ask', title: 'Ask me', body: 'Pause on each patch and wait for you to approve or reject it here.' },
+  { value: 'auto', title: 'Auto-approve', body: 'Apply every patch without asking. Verification still runs.' },
+]
+const FAILURE_OPTIONS: { value: FailurePolicy; title: string; body: string }[] = [
+  { value: 'rollback', title: 'Roll back', body: 'Revert a patch that breaks the build or leaves the smell.' },
+  { value: 'keep', title: 'Leave it', body: 'Commit it to the branch marked [unverified] for inspection.' },
+]
+const VERIFY_OPTIONS: { value: VerifyLevel; title: string; body: string }[] = [
+  { value: 'compile', title: 'Compile', body: 'Compile main and test code with the detected build tool.' },
+  { value: 'test', title: 'Compile + tests', body: 'Run the test suite too. Thorough, much slower.' },
+  { value: 'none', title: 'Re-detect only', body: 'Skip the build; only check that the smell is gone.' },
+]
+
 function Setup({ catalog, onStarted }: { catalog: SmellCatalog; onStarted: (job: Job) => void }) {
   const [mode, setMode] = useState<'local' | 'git'>(catalog.defaultLocalRepo ? 'local' : 'git')
   const [localPath, setLocalPath] = useState(catalog.defaultLocalRepo ?? 'target-repo')
@@ -225,11 +282,16 @@ function Setup({ catalog, onStarted }: { catalog: SmellCatalog; onStarted: (job:
   const [scope, setScope] = useState<'all' | 'select'>('all')
   const [selected, setSelected] = useState<string[]>([])
   const [llm, setLlm] = useState(catalog.llmAvailable)
+  const [applyMode, setApplyMode] = useState<ApplyMode>('never')
+  const [onFailure, setOnFailure] = useState<FailurePolicy>('rollback')
+  const [verifyLevel, setVerifyLevel] = useState<VerifyLevel>('compile')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const source = mode === 'local' ? localPath : url
   const smells = scope === 'all' ? undefined : selected
+  const effectiveApply: ApplyMode = llm ? applyMode : 'never'
+  const applies = effectiveApply === 'ask' || effectiveApply === 'auto'
   const canStart = source.trim().length > 0 && (scope === 'all' || selected.length > 0) && !submitting
 
   const start = async () => {
@@ -242,6 +304,9 @@ function Setup({ catalog, onStarted }: { catalog: SmellCatalog; onStarted: (job:
         llm,
         branch: mode === 'git' && branch.trim() ? branch.trim() : null,
         runName: mode === 'git' ? 'dashboard-git' : 'dashboard',
+        applyMode: effectiveApply,
+        onFailure,
+        verifyLevel,
       })
       onStarted(job)
     } catch (err) {
@@ -340,6 +405,35 @@ function Setup({ catalog, onStarted }: { catalog: SmellCatalog; onStarted: (job:
         </div>
       </section>
 
+      <section>
+        <SectionHeading step={4} title="Autonomous refactoring" />
+        <div className="mt-4 space-y-6 rounded-lg border border-border p-5">
+          {!llm && (
+            <p className="text-[13px] text-text-tertiary">
+              Needs LLM validation: patches are generated from the LLM&rsquo;s refactoring plans.
+            </p>
+          )}
+          <Choice label="Apply mode" value={effectiveApply} onChange={setApplyMode} options={APPLY_OPTIONS} disabled={!llm} />
+          {applies && (
+            <>
+              <Choice label="Verification" value={verifyLevel} onChange={setVerifyLevel} options={VERIFY_OPTIONS} />
+              <Choice label="If verification fails" value={onFailure} onChange={setOnFailure} options={FAILURE_OPTIONS} />
+              <div className="flex gap-3 rounded-md border border-warning/30 bg-warning-dim px-4 py-3 text-[13px] leading-relaxed text-warning">
+                <Warning size={16} weight="bold" className="mt-0.5 shrink-0" />
+                <p>
+                  Patches go to a new <span className="font-mono">refactor/&lt;run&gt;</span> branch in a separate git
+                  worktree; your working tree is never modified, and the repository must be a git repo with no
+                  uncommitted changes to tracked files. Verification runs the repository&rsquo;s own build (Maven,
+                  Gradle, Ant, Go, Cargo, .NET, npm or Python), which executes its build plugins and tests &mdash; only
+                  use it on code you trust.
+                  {effectiveApply === 'auto' && ' Auto-approve applies every patch without showing it to you first.'}
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+
       {error && (
         <div className="rounded-lg border border-danger/30 bg-danger-dim px-4 py-3 text-sm text-danger">{error}</div>
       )}
@@ -361,6 +455,8 @@ function Setup({ catalog, onStarted }: { catalog: SmellCatalog; onStarted: (job:
           equivalent: python -m pipeline.run_pipeline {source || '<repo>'}
           {smells ? ` --smells ${smells.join(' ')}` : ''}
           {llm ? '' : ' --no-llm'}
+          {effectiveApply !== 'never' ? ` --apply ${effectiveApply}` : ''}
+          {applies ? ` --verify-level ${verifyLevel} --on-failure ${onFailure}` : ''}
         </span>
       </div>
     </div>

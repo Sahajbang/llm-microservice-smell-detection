@@ -72,8 +72,9 @@ export function Refactoring() {
       <h1 className="text-3xl font-semibold tracking-tight text-text">Refactoring</h1>
       <p className="mt-3 max-w-2xl text-text-secondary">
         For every confirmed finding, the refactoring agent proposes the minimal scope-limited change that addresses
-        it. Each file it names is checked against the services in the finding before the plan is accepted. Proposals
-        are never applied automatically.
+        it. Each file it names is checked against the services in the finding before the plan is accepted. Plans are
+        only turned into code when a run is started with an apply mode, and then on a separate branch, after a build
+        and re-detection check.
       </p>
 
       {state.status === 'loading' && (

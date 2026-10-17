@@ -176,9 +176,13 @@ Only proceed here once Steps 1–7 run end-to-end successfully on at least one r
   request. Detects services sharing a database/schema/tables from datasource config, JPA
   `@Table` declarations and SQL schema/migration files. Its provenance (not PRD scope) is
   recorded in `pipeline/smells.py` and README.md.
+- ✅ **Automated patch application** — opt-in `--apply never|dry-run|ask|auto`: LLM patch
+  generation (`pipeline/patch_generator.py`), human or automatic approval, application in a
+  git worktree on a `refactor/<run id>` branch (`pipeline/patch_applier.py`), build-tool-agnostic
+  verification plus re-detection (`pipeline/verifier.py`), and commit or rollback/keep per
+  `--on-failure`. Default `never` keeps Step 6's manual behaviour.
 
 **Still outstanding:**
-- **Automated patch application** — replace manual git apply in Step 6 with a programmatic patch applier + compiler/test runner wrapper.
 - **RAG layer (chunking → CodeBERT embeddings → FAISS)** — only once a single implicated service's relevant code no longer fits comfortably in one prompt, or once testing spans multiple repos where relevance can't be hand-verified. The SDG continues to do coarse filtering first; FAISS ranks within that already-narrowed scope.
 - **LangGraph orchestration** — wrap the Detection → Refactoring → Verification sequence with retry logic, once the underlying logic is stable and doesn't need debugging at the same time as the framework.
 - **External tool cross-validation** — run Arcan/MSANose/DesigniteJava on the same repo and compare their extracted graph against your own extractor's output, as a validation step for the methods section.

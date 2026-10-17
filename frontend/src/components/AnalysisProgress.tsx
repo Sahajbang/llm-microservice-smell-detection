@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Check, Warning, X } from '@phosphor-icons/react'
 import type { Job, JobEvent } from '../types'
 import { cn } from '../lib/cn'
+import { ApprovalPanel } from './PatchReview'
 
 /** Elapsed seconds, ticking while the job runs. */
 function useElapsed(startedAt: string, finishedAt: string | null): number {
@@ -209,6 +210,12 @@ export function AnalysisProgress({
                   static only
                 </span>
               )}
+              {job.applyMode !== 'never' && (
+                <span className="rounded-full border border-accent/40 bg-accent-dim/30 px-2 py-0.5 font-mono text-[11px] text-accent">
+                  apply: {job.applyMode}
+                  {job.applyMode !== 'dry-run' && ` · verify ${job.verifyLevel} · on failure ${job.onFailure}`}
+                </span>
+              )}
             </div>
           </div>
           <div className="text-right">
@@ -224,6 +231,8 @@ export function AnalysisProgress({
           <p className="break-words">{job.error}</p>
         </div>
       )}
+
+      <ApprovalPanel job={job} />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <ol className="rounded-lg border border-border p-5">
@@ -247,6 +256,27 @@ export function AnalysisProgress({
           <Count label="Confirmed by LLM" value={job.counts.confirmed_by_llm} />
           <Count label="Refactoring plans" value={job.counts.refactoring_proposals} />
           <Count label="Errors" value={job.counts.errors} tone={job.counts.errors > 0 ? 'danger' : undefined} />
+        </div>
+      )}
+
+      {job.counts?.patches_by_status && (
+        <div className="rounded-lg border border-border px-5 py-4 text-sm text-text-secondary">
+          <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">Patches</span>
+          <span className="ml-3 font-mono text-xs">
+            {Object.entries(job.counts.patches_by_status)
+              .map(([status, n]) => `${n} ${status.replace('_', ' ')}`)
+              .join(' · ') || 'none generated'}
+          </span>
+          {job.refactor?.branch ? (
+            <p className="mt-2 font-mono text-xs text-text">
+              Branch <span className="text-accent">{job.refactor.branch}</span> &mdash; {job.refactor.inspect}
+              {job.refactor.clone_kept_at && (
+                <span className="block text-text-tertiary">clone kept at {job.refactor.clone_kept_at}</span>
+              )}
+            </p>
+          ) : (
+            job.refactor?.error && <p className="mt-2 text-xs text-danger">{job.refactor.error}</p>
+          )}
         </div>
       )}
 

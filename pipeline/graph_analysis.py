@@ -9,7 +9,8 @@ the LLM's reasoning in Step 4.
 `docker-compose.yml` `depends_on` edges are excluded from cycle detection by
 default: they encode container startup ordering, not the request-flow
 coupling that "Cyclic Dependency" as an architectural smell is about. They
-remain available in the full edge list for context. Pass
+remain available in the full edge list for context. Gateway route edges
+(config-declared proxying) are excluded for the same reason. Pass
 `exclude_sources=set()` to include them.
 
 Cycles are canonicalized before being returned. `networkx.simple_cycles`
@@ -30,7 +31,7 @@ from pathlib import Path
 
 import networkx as nx
 
-DEFAULT_EXCLUDED_SOURCES = frozenset({"docker-compose"})
+DEFAULT_EXCLUDED_SOURCES = frozenset({"docker-compose", "gateway-route"})
 
 
 def build_graph(

@@ -167,8 +167,36 @@ def test_unknown_stage_does_not_raise():
 def test_every_described_phase_is_a_real_station():
     """A label mapped to a phase the UI does not render would be invisible."""
     known = set(dict(jobs.PHASES))
-    for stage in ("00_run_metadata", "01_evidence", "02_detection", "finding_x", "detection_x", "refactoring_x", "99_result"):
+    for stage in (
+        "00_run_metadata",
+        "01_evidence",
+        "02_detection",
+        "finding_x",
+        "detection_x",
+        "refactoring_x",
+        "patch_x",
+        "apply_x",
+        "03_apply_summary",
+        "99_result",
+    ):
         assert jobs.describe_stage(stage, {})[0] in known
+
+
+def test_apply_stage_reports_the_verification_outcome():
+    phase, label, detail = jobs.describe_stage(
+        "apply_x",
+        {
+            "status": "rolled_back",
+            "verification": {"build": {"status": "failed"}, "redetection": {"resolved": True}},
+        },
+    )
+    assert phase == "apply" and "rolled back" in label
+    assert detail == "build failed, smell resolved"
+
+
+def test_apply_summary_names_the_kept_branch():
+    _, label, detail = jobs.describe_stage("03_apply_summary", {"branch": "refactor/r1", "commits": ["a", "b"]})
+    assert "refactor/r1" in label and "2 commit" in detail
 
 
 # -- job lifecycle ------------------------------------------------------------
@@ -184,7 +212,7 @@ def fake_result(run_id: str, *, findings: int = 0, errors: list | None = None) -
 def test_job_runs_the_pipeline_and_records_progress(monkeypatch, tmp_path):
     import pipeline.run_pipeline as rp
 
-    def fake_analyze(source, *, branch=None, config=None, logger=None, run_name="", keep_clone=False):
+    def fake_analyze(source, *, branch=None, config=None, logger=None, run_name="", keep_clone=False, approver=None):
         logger.log_stage("01_evidence", {"dependencies": [{}], "persistence": [], "services": ["a"]})
         logger.log_stage("99_result", {"counts": {"findings": 0, "confirmed_by_llm": 0, "refactoring_proposals": 0}})
         return fake_result(logger.dir.name)
@@ -226,7 +254,7 @@ def test_only_one_analysis_runs_at_a_time(monkeypatch, tmp_path):
 
     release = __import__("threading").Event()
 
-    def slow_analyze(source, *, branch=None, config=None, logger=None, run_name="", keep_clone=False):
+    def slow_analyze(source, *, branch=None, config=None, logger=None, run_name="", keep_clone=False, approver=None):
         release.wait(timeout=5)
         return fake_result(logger.dir.name)
 
@@ -250,7 +278,7 @@ def test_selected_smells_reach_the_pipeline_config(monkeypatch, tmp_path):
 
     seen = {}
 
-    def capture(source, *, branch=None, config=None, logger=None, run_name="", keep_clone=False):
+    def capture(source, *, branch=None, config=None, logger=None, run_name="", keep_clone=False, approver=None):
         seen["detectors"] = config.enabled_detectors
         seen["llm"] = config.llm.enabled
         return fake_result(logger.dir.name)
@@ -259,6 +287,129 @@ def test_selected_smells_reach_the_pipeline_config(monkeypatch, tmp_path):
 
     wait_for(jobs.start_job("target-repo", smells=["hub_dependency"], llm=False, log_dir=tmp_path))
     assert seen == {"detectors": ("hub_dependency",), "llm": False}
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"apply_mode": "yolo"}, "applyMode"),
+        ({"on_failure": "panic"}, "onFailure"),
+        ({"verify_level": "deploy"}, "verifyLevel"),
+        ({"apply_mode": "auto", "llm": False}, "needs LLM"),
+    ],
+)
+def test_rejects_invalid_refactoring_options(kwargs, message):
+    with pytest.raises(jobs.JobError, match=message):
+        jobs.start_job("target-repo", **{"llm": True, **kwargs})
+
+
+def test_refactoring_options_reach_the_pipeline_config(monkeypatch, tmp_path):
+    import pipeline.run_pipeline as rp
+
+    seen = {}
+
+    def capture(source, *, config=None, logger=None, approver=None, **_):
+        seen.update(mode=config.refactor.mode, on_failure=config.refactor.on_failure, level=config.refactor.verify_level)
+        seen["approver"] = approver
+        return fake_result(logger.dir.name)
+
+    monkeypatch.setattr(rp, "analyze_repository", capture)
+    wait_for(
+        jobs.start_job(
+            "target-repo", apply_mode="auto", on_failure="keep", verify_level="test", log_dir=tmp_path
+        )
+    )
+    assert seen == {"mode": "auto", "on_failure": "keep", "level": "test", "approver": None}
+
+
+def _ask_mode_job(monkeypatch, tmp_path, kinds=("apply",)):
+    """Start an ask-mode job whose fake pipeline asks `kinds` in turn and
+    records the answers it got."""
+    import pipeline.run_pipeline as rp
+
+    answers = []
+
+    def asking(source, *, logger=None, approver=None, **_):
+        for kind in kinds:
+            answers.append(approver(kind, {"finding_key": "k", "diff": "+x", "default": "rollback"}))
+        return fake_result(logger.dir.name)
+
+    monkeypatch.setattr(rp, "analyze_repository", asking)
+    job = jobs.start_job("target-repo", apply_mode="ask", log_dir=tmp_path)
+    return job, answers
+
+
+def wait_for_question(job: jobs.Job, timeout: float = 5.0) -> dict:
+    deadline = time.time() + timeout
+    while job.to_dict()["pendingDecision"] is None and time.time() < deadline:
+        time.sleep(0.02)
+    pending = job.to_dict()["pendingDecision"]
+    assert pending, "the job never asked"
+    return pending
+
+
+def test_ask_mode_blocks_until_the_browser_answers(monkeypatch, tmp_path):
+    job, answers = _ask_mode_job(monkeypatch, tmp_path, kinds=("apply", "failure"))
+
+    first = wait_for_question(job)
+    assert first["kind"] == "apply" and first["options"] == ["approve", "reject", "approve_all"]
+    assert first["diff"] == "+x"
+    assert job.status == "running"
+    job.answer(first["id"], "approve")
+
+    deadline = time.time() + 5
+    while (p := job.to_dict()["pendingDecision"]) is None or p["id"] == first["id"]:
+        assert time.time() < deadline
+        time.sleep(0.02)
+    assert p["kind"] == "failure" and p["default"] == "rollback"
+    job.answer(p["id"], "keep")
+
+    wait_for(job)
+    assert answers == ["approve", "keep"]
+    assert job.to_dict()["pendingDecision"] is None
+
+
+def test_stale_and_invalid_answers_are_refused(monkeypatch, tmp_path):
+    job, answers = _ask_mode_job(monkeypatch, tmp_path)
+    pending = wait_for_question(job)
+
+    with pytest.raises(jobs.StaleDecision):
+        job.answer("not-the-id", "approve")
+    with pytest.raises(jobs.JobError):
+        job.answer(pending["id"], "keep")  # a failure answer to an apply question
+
+    job.answer(pending["id"], "reject")
+    wait_for(job)
+    assert answers == ["reject"]
+    with pytest.raises(jobs.StaleDecision):
+        job.answer(pending["id"], "approve")
+
+
+def test_unanswered_question_times_out_to_the_safe_choice(tmp_path):
+    job = jobs.Job(id="j", source="x", smells=[], llm=True)
+    assert job.ask("apply", {"finding_key": "k"}, timeout=0.05) == "reject"
+    assert job.ask("failure", {"finding_key": "k", "default": "keep"}, timeout=0.05) == "keep"
+    assert any("timed out" in e["label"] for e in job.events)
+
+
+def test_decision_endpoint_maps_errors_to_http_statuses(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    job, _ = _ask_mode_job(monkeypatch, tmp_path)
+    pending = wait_for_question(job)
+    client = TestClient(app)
+
+    assert client.post("/api/jobs/nope/decision", json={"decisionId": "x", "answer": "approve"}).status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/decision", json={"decisionId": "x", "answer": "approve"}).status_code == 409
+    assert client.post(
+        f"/api/jobs/{job.id}/decision", json={"decisionId": pending["id"], "answer": "nuke"}
+    ).status_code == 400
+    ok = client.post(f"/api/jobs/{job.id}/decision", json={"decisionId": pending["id"], "answer": "approve"})
+    assert ok.status_code == 200
+    assert ok.json()["pendingDecision"] is None
+    wait_for(job)
 
 
 def test_job_payload_carries_no_absolute_local_path(monkeypatch, tmp_path):

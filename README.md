@@ -2,9 +2,10 @@
 
 Detect architectural smells in a Java Spring Boot microservices repository using static
 analysis, have an LLM confirm whether each finding is a genuine problem, propose a
-scope-limited fix with a second LLM call, and log every stage for reproducibility. The
-pipeline takes a **Git URL or a local path** and runs **multiple smell detectors** in one
-pass. Full spec and rationale: [CLAUDE.md](CLAUDE.md).
+scope-limited fix with a second LLM call, optionally **turn that fix into code, apply it on a
+separate branch and verify it** (with your approval, or automatically), and log every stage
+for reproducibility. The pipeline takes a **Git URL or a local path** and runs **multiple
+smell detectors** in one pass. Full spec and rationale: [CLAUDE.md](CLAUDE.md).
 
 ## Quick start
 
@@ -17,6 +18,9 @@ python -m pipeline.run_pipeline target-repo --no-llm
 
 # One smell only, writing the unified result somewhere
 python -m pipeline.run_pipeline target-repo --smells cyclic_dependency --output result.json
+
+# Apply the proposed fixes: review each patch, build + re-detect, commit to refactor/<run>
+python -m pipeline.run_pipeline target-repo --apply ask --verify-level compile
 ```
 
 Or drive it from the dashboard — pick the repository and the smells in the browser and watch
@@ -55,7 +59,7 @@ of the original PRD scope.
 | 3 | Graph + cycle detection | ✅ Done — cycles now canonicalized |
 | 4 | LLM Detection Agent | ✅ Done — generalized to any smell |
 | 5 | LLM Refactoring Agent | ✅ Done — generalized to any smell |
-| 6 | Manual apply & verify | ❌ **Not started** |
+| 6 | Apply & verify | ✅ Automated, opt-in (`--apply`) — patch generation, approval, git worktree branch, build + re-detection, commit or rollback |
 | 7 | Per-run logging | ✅ Done — generalized to multi-smell runs |
 | — | Repository acquisition (Git URL / local path) | ✅ Done |
 | — | Pipeline orchestrator (`run_pipeline.py`) | ✅ Done |
@@ -131,10 +135,33 @@ accepted), bounded by `max_retries`.
 [`logs/runs/20260914T180118Z_step5-refactoring/step5_refactoring_customers-service_visits-service.json`](logs/runs/20260914T180118Z_step5-refactoring/step5_refactoring_customers-service_visits-service.json).
 Tested in [`tests/test_llm_refactoring.py`](tests/test_llm_refactoring.py).
 
-### Step 6 — Manual apply & verify — **not started**
-The Step 5 plan above has not yet been applied to `target-repo`, `mvn test` has not been
-re-run against the change, and the extractor/cycle-detector have not been re-run to confirm
-the cycle disappears. This is the immediate next task (see Developer A below).
+### Step 6 — Apply & verify (automated, opt-in)
+CLAUDE.md scoped this step as manual for Phase 1; it is now automated behind `--apply`
+(default `never`, so existing runs are unchanged). For each refactoring plan:
+
+1. **Patch generation** ([`pipeline/patch_generator.py`](pipeline/patch_generator.py)) — a
+   third LLM call gets the plan plus the current contents of the files it names and returns
+   each changed file *in full* (delimited blocks, not JSON, not diffs). Every returned path is
+   checked for traversal and against the same module-scope rule as the plan; a bad response
+   is re-prompted with the reason.
+2. **Approval** — `ask` shows the diff and waits (terminal prompt, or the dashboard's approval
+   panel); `auto` approves everything; `dry-run` stops after showing the diff.
+3. **Apply** ([`pipeline/patch_applier.py`](pipeline/patch_applier.py)) — in a separate
+   `git worktree` on a new `refactor/<run id>` branch. The analyzed working tree is never
+   modified and the branch you are on never changes.
+4. **Verify** ([`pipeline/verifier.py`](pipeline/verifier.py)) — the repository's own build
+   (Maven, Gradle, Ant, Go, Cargo, .NET, npm or Python, detected from marker files, wrapper
+   scripts preferred) at `compile` or `test` level, plus re-running the finding's detector on
+   the patched tree. The build is also run once *before* the patch, so a build that was already
+   broken is reported as "skipped", not blamed on the patch.
+5. **Commit or roll back** — a verified patch is committed. A failed one is rolled back, or —
+   with `--on-failure keep` — committed marked `[unverified]` for inspection (in `ask` mode you
+   are asked each time).
+
+The branch is kept only if something was committed; inspect it with the `git diff` command the
+run prints, and merge it yourself. Tested in [`tests/test_autorefactor.py`](tests/test_autorefactor.py)
+against real git repositories with a mocked LLM; the Maven path was additionally smoke-tested
+against `target-repo` (baseline build, passing patch, compile-breaking patch, rollback).
 
 ### Step 7 — Logging ([`pipeline/run_logger.py`](pipeline/run_logger.py))
 One timestamped directory per run under `logs/runs/`, one JSON file per stage, including
@@ -162,6 +189,11 @@ LLM validation           pipeline/llm_detection.py  per finding, prompt built fr
          |                                          smell's spec in pipeline/smells.py
          v
 LLM refactoring          pipeline/llm_refactoring.py scope-checked proposal, no code edits
+         |
+         v  (opt-in: --apply dry-run | ask | auto)
+patch -> approve ->      pipeline/patch_generator.py full-file patch, scope + traversal checked
+apply -> verify ->       pipeline/patch_applier.py  git worktree on refactor/<run id>
+commit | rollback        pipeline/verifier.py       build tool + re-detection
          |
          v
 logging + result         pipeline/run_logger.py     one directory per run
@@ -215,6 +247,14 @@ python -m pipeline.run_pipeline https://github.com/owner/repo \
 | `--run-name` | Label for the run log directory under `logs/runs/` |
 | `--output` | Also write the unified result JSON to this path |
 | `--keep-clone` | Keep a cloned repository instead of deleting it after the run |
+| `--apply` | `never` (default, propose only), `dry-run` (show patches, write nothing), `ask` (approve each patch), `auto` (apply all) |
+| `--on-failure` | `rollback` (default) or `keep` — what happens to a patch that fails verification |
+| `--verify-level` | `compile` (default), `test`, or `none` (re-detection only) |
+| `--verify-cmd` | Shell command replacing the detected build check, run from the repository root (CLI only — never accepted by the API) |
+
+`--apply` needs the LLM (it is rejected with `--no-llm`), a git repository, and no uncommitted
+changes to tracked files under the analyzed path. A cloned URL is kept (not deleted) when its
+refactor branch received commits, since that clone is the only copy of the work.
 
 The Phase 1 single-step commands still work unchanged:
 
@@ -242,6 +282,11 @@ detectors, so a run can state exactly which parameters produced it (they are wri
 | `excluded_edge_sources` | `docker-compose` | Edge sources kept out of the graph |
 | `repository.clone_depth` / `max_repo_size_mb` | 1 / 1024 | Clone limits |
 | `llm.min_finding_confidence` | 0.0 | Skip weak findings before spending tokens |
+| `refactor.verify_timeout_seconds` | 1800 | Per build command |
+| `refactor.patch_max_tokens` | 16384 | Output budget for the full-file patch call |
+| `refactor.max_patch_input_chars` | 120000 | Plans whose files exceed this are refused, not truncated |
+| `refactor.approval_timeout_seconds` | 1800 | Dashboard `ask` mode: unanswered → reject / failure policy |
+| `refactor.worktree_root` | `%TEMP%/tarp-wt` | Where worktrees are created (short, for Windows' path limit) |
 
 ## Tests
 
@@ -277,8 +322,18 @@ These are real boundaries of the current implementation, not oversights:
   observed when it was not.
 - **No private repositories.** Only public `https://` clones are supported; credential
   prompts are disabled so a private URL fails fast instead of hanging.
-- **Refactoring is a proposal only.** The agent never edits code (CLAUDE.md Step 6 remains
-  manual).
+- **Applying refactorings executes the repository's build.** Build plugins and tests are
+  arbitrary code; use `--verify-level none` (re-detection only) for repositories you do not
+  trust. This is the only place the pipeline runs analyzed code.
+- **One prompt per patch.** The files a plan names must fit in one prompt
+  (`refactor.max_patch_input_chars`); larger plans are refused rather than truncated — the
+  CLAUDE.md RAG layer is the intended fix.
+- **Build checks run in a fresh checkout.** Maven/Gradle/Go/Cargo/.NET use global caches and
+  work as-is; npm installs first; Python is syntax-only (`compileall`) unless `--verify-cmd`
+  supplies the real command.
+- **"Resolved" means the same finding key is no longer detected.** A fix that lowers coupling
+  but leaves a hub above its thresholds counts as unresolved and is rolled back unless you
+  choose `keep`.
 
 ## Dashboard
 
@@ -292,6 +347,13 @@ then shows the run's real progress: a station-by-station view of the orchestrato
 writes it to disk, alongside a live stage log. Nothing about the progress is simulated —
 `api/jobs.py` subclasses the pipeline's `RunLogger`, so a station lights up only when that
 stage has completed. When the run finishes it links straight to the full run log.
+
+**Applying fixes.** Step 4 of the form picks an apply mode (propose only / preview patches /
+ask me / auto-approve), the verification level, and what to do with a patch that fails. In
+*ask me* mode the run pauses on each patch and the progress page shows an approval panel with
+the diff (`POST /api/jobs/{id}/decision` answers it); unanswered questions time out to the safe
+choice. Each finding card then shows the patch's status, verification results, build output
+and diff. A custom verify command is deliberately not offered over HTTP.
 
 **Reading results.** `/detection` lists every finding of the latest run, of any smell, showing
 the deterministic detector's severity/confidence and the LLM's verdict side by side (the model
@@ -367,10 +429,10 @@ repository is now committed rather than needing a patch file.
 
 Remaining, in rough priority order:
 
-1. **Step 6 — apply & verify.** Apply a proposed refactoring to `target-repo`, run `mvn test`,
-   and re-run the pipeline to confirm the finding disappears. This is Phase 1's final
-   accept/reject gate and is still manual. Automating it (branch → patch → compile → test →
-   re-detect) is the natural follow-up.
+1. **Step 6 — run the automated loop for real.** The apply/verify machinery is built and
+   tested, but has not yet been run against `target-repo` with a live LLM: run
+   `--apply ask --verify-level test`, record whether the cycle disappears and tests stay
+   green, and keep that run log as the Phase 1 end-to-end evidence.
 2. **Evaluation corpus.** Run the pipeline across several repositories and label the findings
    to get precision/recall per smell, which is what the thesis's measurement chapter needs.
 3. **Phase 2+ items from CLAUDE.md** not yet started: RAG over large services, LangGraph

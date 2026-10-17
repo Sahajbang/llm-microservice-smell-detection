@@ -3,6 +3,7 @@ import type { DetectionStage, Finding, RefactoringStage } from '../types'
 import { SeverityBadge, StatusPill } from './Badges'
 import { CodeEvidence } from './CodeEvidence'
 import { ReasoningTrace } from './ReasoningTrace'
+import { PatchResultView } from './PatchReview'
 import { cn } from '../lib/cn'
 
 /** One badge per smell so multi-smell runs stay readable at a glance. */
@@ -187,6 +188,7 @@ export function FindingCard({
       )}
 
       {showRefactoring && <RefactoringPlan finding={finding} />}
+      {showRefactoring && finding.patch && <PatchResultView patch={finding.patch} />}
 
       {(detectionStage || refactoringStage) && (
         <div className="mt-6 space-y-3">

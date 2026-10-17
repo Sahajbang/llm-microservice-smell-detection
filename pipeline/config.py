@@ -15,16 +15,19 @@ thesis.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Dependency-edge sources that describe container startup ordering rather
-# than a request-time call. Excluded from the service dependency graph used
-# for cycle and hub detection (they remain in the evidence for context).
-DEFAULT_EXCLUDED_EDGE_SOURCES = frozenset({"docker-compose"})
+# Dependency-edge sources excluded from the service dependency graph used for
+# cycle and hub detection (they remain in the evidence and on the dashboard):
+#   - docker-compose: container startup ordering, not a request-time call.
+#   - gateway-route: a gateway proxying to every service is the gateway
+#     pattern by design; counting it would make every gateway a "hub".
+DEFAULT_EXCLUDED_EDGE_SOURCES = frozenset({"docker-compose", "gateway-route"})
 
 # Every detector key the pipeline knows about, in execution order.
 ALL_DETECTORS = ("cyclic_dependency", "hub_dependency", "shared_persistence")
@@ -117,6 +120,58 @@ class LLMConfig:
     refactor_only_when_recommended: bool = True
 
 
+APPLY_MODES = ("never", "dry-run", "ask", "auto")
+FAILURE_POLICIES = ("rollback", "keep")
+VERIFY_LEVELS = ("none", "compile", "test")
+
+
+@dataclass(frozen=True)
+class RefactorConfig:
+    """Autonomous refactoring: whether proposals are turned into code, and how
+    the result is checked.
+
+    * ``mode`` -- ``never`` stops at the proposal (Phase 1 behaviour);
+      ``dry-run`` generates the concrete patch but writes nothing; ``ask``
+      pauses for a human decision per patch; ``auto`` applies every patch.
+    * ``on_failure`` -- what happens to a patch that fails verification:
+      ``rollback`` reverts it, ``keep`` commits it to the refactor branch
+      (marked unverified) so it can be inspected.
+    * ``verify_level`` -- ``compile`` and ``test`` run the repository's own
+      build tool (see pipeline.verifier); ``none`` relies on re-detection only.
+    * ``verify_command`` -- replaces the detected build command. CLI only:
+      it is a shell command, so it is never accepted over HTTP.
+
+    Patches are applied in a separate git worktree on a new branch, never in
+    the analyzed working tree. ``worktree_root`` sits outside the project
+    by default so writing a checkout does not trigger the API's --reload.
+    """
+
+    mode: str = "never"
+    on_failure: str = "rollback"
+    verify_level: str = "compile"
+    verify_command: Optional[str] = None
+    verify_timeout_seconds: int = 1800
+    # Full-file output for several Java files does not fit the 4096-token
+    # default used for the JSON-only detection/refactoring calls.
+    patch_max_tokens: int = 16384
+    # Above this many characters of current source, a single prompt is not
+    # a reliable way to rewrite the files (see CLAUDE.md, RAG layer).
+    max_patch_input_chars: int = 120_000
+    approval_timeout_seconds: int = 1800
+    # Kept short on purpose: Windows' 260-character path limit is easy to hit
+    # with deep Java package paths under a long temp directory.
+    worktree_root: Path = Path(tempfile.gettempdir()) / "tarp-wt"
+
+    def __post_init__(self) -> None:
+        for value, allowed, name in (
+            (self.mode, APPLY_MODES, "mode"),
+            (self.on_failure, FAILURE_POLICIES, "on_failure"),
+            (self.verify_level, VERIFY_LEVELS, "verify_level"),
+        ):
+            if value not in allowed:
+                raise ValueError(f"refactor.{name} must be one of {list(allowed)}, got {value!r}")
+
+
 @dataclass(frozen=True)
 class AnalysisConfig:
     """Top-level configuration for one pipeline run."""
@@ -127,6 +182,7 @@ class AnalysisConfig:
     shared_persistence: SharedPersistenceConfig = field(default_factory=SharedPersistenceConfig)
     repository: RepositoryConfig = field(default_factory=RepositoryConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    refactor: RefactorConfig = field(default_factory=RefactorConfig)
 
     def with_detectors(self, detectors: Optional[list[str]]) -> "AnalysisConfig":
         if not detectors:

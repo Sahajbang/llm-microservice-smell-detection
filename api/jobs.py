@@ -10,6 +10,11 @@ Progress is not simulated: :class:`ProgressLogger` subclasses the pipeline's
 own :class:`~pipeline.run_logger.RunLogger`, so every event the UI shows
 corresponds to a stage the orchestrator actually finished and wrote to disk.
 
+In ``ask`` refactoring mode the pipeline thread blocks in :meth:`Job.ask`
+until the browser answers through ``POST /api/jobs/{id}/decision`` (or the
+approval timeout passes, which takes the safe choice). The pending question
+is part of the polled job payload, so no extra endpoint is needed to see it.
+
 ponytail: jobs live in a module-level dict, so they are lost on restart and
 do not survive more than one uvicorn worker. That is the right size for a
 single-user research dashboard; move to a real queue only if runs ever need
@@ -20,12 +25,19 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from pipeline.config import ALL_DETECTORS, AnalysisConfig, default_config
+from pipeline.config import (
+    ALL_DETECTORS,
+    APPLY_MODES,
+    FAILURE_POLICIES,
+    VERIFY_LEVELS,
+    AnalysisConfig,
+    default_config,
+)
 from pipeline.repository import looks_like_git_url, validate_git_url
 from pipeline.run_logger import RunLogger
 
@@ -40,13 +52,20 @@ PHASES: tuple[tuple[str, str], ...] = (
     ("detect", "Detect smells"),
     ("validate", "LLM validation"),
     ("refactor", "LLM refactoring"),
+    ("apply", "Apply & verify"),
     ("complete", "Complete"),
 )
 PHASE_ORDER = {key: i for i, (key, _) in enumerate(PHASES)}
 
+DECISION_OPTIONS = {"apply": ("approve", "reject", "approve_all"), "failure": ("rollback", "keep")}
+
 
 class JobError(ValueError):
-    """Invalid job request (bad source, unknown smell)."""
+    """Invalid job request (bad source, unknown smell, bad decision)."""
+
+
+class StaleDecision(LookupError):
+    """The decision being answered is no longer pending (answered or timed out)."""
 
 
 def resolve_source(source: str) -> str:
@@ -97,6 +116,9 @@ class Job:
     smells: list[str]
     llm: bool
     branch: Optional[str] = None
+    apply_mode: str = "never"
+    on_failure: str = "rollback"
+    verify_level: str = "compile"
     status: str = "running"  # running | done | failed
     started_at: str = field(default_factory=_now)
     finished_at: Optional[str] = None
@@ -104,7 +126,11 @@ class Job:
     phase: str = "acquire"
     events: list[dict[str, Any]] = field(default_factory=list)
     counts: Optional[dict[str, Any]] = None
+    refactor: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    pending: Optional[dict[str, Any]] = None  # the question the run is blocked on
+    _answer: Optional[str] = field(default=None, repr=False)
+    _decided: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record(self, phase: str, label: str, detail: Optional[str] = None) -> None:
@@ -112,6 +138,43 @@ class Job:
             if PHASE_ORDER.get(phase, -1) >= PHASE_ORDER.get(self.phase, -1):
                 self.phase = phase
             self.events.append({"at": _now(), "phase": phase, "label": label, "detail": detail})
+
+    def ask(self, kind: str, request: dict[str, Any], timeout: float) -> str:
+        """Block the pipeline thread until the browser answers (see module docstring).
+
+        No answer within `timeout` takes the safe default: reject the patch,
+        or the configured failure policy.
+        """
+        default = "reject" if kind == "apply" else str(request.get("default") or "rollback")
+        with self._lock:
+            self.pending = {
+                "id": uuid.uuid4().hex[:10],
+                "kind": kind,
+                "options": list(DECISION_OPTIONS[kind]),
+                "default": default,
+                **request,
+            }
+            self._answer = None
+            self._decided.clear()
+        what = "approve this patch" if kind == "apply" else "decide what to do with a failed patch"
+        self.record("apply", f"Waiting for you to {what}", request.get("finding_key"))
+
+        answered = self._decided.wait(timeout)
+        with self._lock:
+            answer = self._answer if answered and self._answer else default
+            self.pending = None
+        self.record("apply", f"Decision: {answer}" + ("" if answered else " (no answer, timed out)"), request.get("finding_key"))
+        return answer
+
+    def answer(self, decision_id: str, answer: str) -> None:
+        with self._lock:
+            if not self.pending or self.pending["id"] != decision_id:
+                raise StaleDecision("That decision is no longer pending -- it was answered or timed out.")
+            if answer not in self.pending["options"]:
+                raise JobError(f"Answer must be one of {self.pending['options']}.")
+            self._answer = answer
+            self.pending = None  # so the response to this very request already shows it answered
+        self._decided.set()
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
@@ -121,6 +184,9 @@ class Job:
                 "smells": self.smells,
                 "llm": self.llm,
                 "branch": self.branch,
+                "applyMode": self.apply_mode,
+                "onFailure": self.on_failure,
+                "verifyLevel": self.verify_level,
                 "status": self.status,
                 "startedAt": self.started_at,
                 "finishedAt": self.finished_at,
@@ -128,6 +194,8 @@ class Job:
                 "phase": self.phase,
                 "events": list(self.events),
                 "counts": self.counts,
+                "refactor": self.refactor,
+                "pendingDecision": dict(self.pending) if self.pending else None,
                 "error": self.error,
             }
 
@@ -204,6 +272,37 @@ def describe_stage(stage_name: str, data: Any) -> tuple[str, str, Optional[str]]
         files = result.get("affected_files") or []
         return "refactor", f"Refactoring plan: {len(files)} file(s)", ", ".join(files[:4]) or None
 
+    if stage_name.startswith("patch_"):
+        files = d.get("files") or []
+        if not files:
+            return "apply", "Patch generation failed", d.get("finding_key")
+        return "apply", f"Patch generated: {len(files)} file(s)", ", ".join(f.get("path", "") for f in files[:4])
+
+    if stage_name.startswith("apply_"):
+        status = d.get("status", "?")
+        label = {
+            "proposed": "Patch previewed (dry run)",
+            "rejected": "Patch rejected",
+            "verified": "Patch verified and committed",
+            "rolled_back": "Patch failed verification, rolled back",
+            "failed_kept": "Patch failed verification, kept on branch",
+            "error": "Patch could not be applied",
+        }.get(status, f"Patch {status}")
+        verification = d.get("verification") or {}
+        detail = None
+        if verification:
+            build = (verification.get("build") or {}).get("status")
+            resolved = (verification.get("redetection") or {}).get("resolved")
+            detail = f"build {build}, smell {'resolved' if resolved else 'still present'}"
+        return "apply", label, detail or d.get("error") or d.get("finding_key")
+
+    if stage_name.startswith("03_apply_summary"):
+        if d.get("error"):
+            return "apply", "Refactoring not applied", d["error"]
+        if d.get("branch"):
+            return "apply", f"Refactor branch kept: {d['branch']}", f"{len(d.get('commits') or [])} commit(s)"
+        return "apply", "No patch committed", None
+
     if stage_name.startswith("99_result"):
         counts = d.get("counts") or {}
         return (
@@ -245,17 +344,36 @@ def start_job(
     branch: Optional[str] = None,
     run_name: str = "dashboard",
     log_dir: Optional[Path] = None,
+    apply_mode: str = "never",
+    on_failure: str = "rollback",
+    verify_level: str = "compile",
 ) -> Job:
     """Validate the request, then run the pipeline on a background thread.
 
     Only one analysis runs at a time: the pipeline is CPU- and API-bound and
     a second concurrent run would mostly buy rate-limit errors.
+
+    There is deliberately no way to pass a custom verify command here: it
+    is a shell command, and an HTTP body must not be able to run one.
     """
     global _active
 
     resolved = resolve_source(source)
     selected = resolve_smells(smells)
+    for value, allowed, name in (
+        (apply_mode, APPLY_MODES, "applyMode"),
+        (on_failure, FAILURE_POLICIES, "onFailure"),
+        (verify_level, VERIFY_LEVELS, "verifyLevel"),
+    ):
+        if value not in allowed:
+            raise JobError(f"{name} must be one of {list(allowed)}.")
+    if apply_mode != "never" and not llm:
+        raise JobError("Applying refactorings needs LLM validation: patches come from LLM refactoring plans.")
     config = _build_config(selected, llm)
+    config = replace(
+        config,
+        refactor=replace(config.refactor, mode=apply_mode, on_failure=on_failure, verify_level=verify_level),
+    )
 
     with _jobs_lock:
         current = _jobs.get(_active) if _active else None
@@ -267,6 +385,9 @@ def start_job(
             smells=selected or list(ALL_DETECTORS),
             llm=llm,
             branch=branch or None,
+            apply_mode=apply_mode,
+            on_failure=on_failure,
+            verify_level=verify_level,
         )
         _jobs[job.id] = job
         _active = job.id
@@ -282,8 +403,6 @@ def start_job(
 
 
 def _build_config(smells: Optional[list[str]], llm: bool) -> AnalysisConfig:
-    from dataclasses import replace
-
     config = default_config().with_detectors(smells)
     if not llm:
         config = replace(config, llm=replace(config.llm, enabled=False))
@@ -305,10 +424,17 @@ def _run(
     try:
         logger = ProgressLogger(job, run_name, base_dir=log_dir)
         job.record("acquire", f"Analyzing {job.source}", ", ".join(job.smells))
+        timeout = config.refactor.approval_timeout_seconds
         result = analyze_repository(
-            source, branch=branch, config=config, logger=logger, run_name=run_name
+            source,
+            branch=branch,
+            config=config,
+            logger=logger,
+            run_name=run_name,
+            approver=(lambda kind, request: job.ask(kind, request, timeout)) if job.apply_mode == "ask" else None,
         )
         job.counts = result.counts()
+        job.refactor = result.refactor
         job.run_id = result.run_id
         job.status = "failed" if (result.errors and not result.results) else "done"
         if job.status == "failed":

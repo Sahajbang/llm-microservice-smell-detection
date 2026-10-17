@@ -46,6 +46,7 @@ const SOURCE_LABELS: Record<string, string> = {
   webclient: 'WebClient',
   'discovery-client': 'DiscoveryClient',
   'http-literal': 'HTTP literal',
+  'gateway-route': 'Gateway route',
   'docker-compose': 'docker-compose',
 }
 

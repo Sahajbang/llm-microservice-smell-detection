@@ -21,9 +21,11 @@ strict:
 * Credential prompts are disabled, so a private repository fails fast
   instead of hanging. Private-repository authentication is NOT supported.
 
-Nothing in this module (or anywhere else in the pipeline) executes code
-from the analyzed repository: no build, no test run, no Python import. The
-analysis is static.
+Nothing in this module executes code from the analyzed repository: no
+build, no test run, no Python import. The analysis is static. The one
+exception anywhere in the pipeline is the opt-in verification step of
+autonomous refactoring (pipeline.verifier), which runs the repository's own
+build -- see the SECURITY note there.
 """
 
 from __future__ import annotations

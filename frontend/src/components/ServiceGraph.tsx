@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { CornersOut, Minus, Plus } from '@phosphor-icons/react'
 import type { GraphResponse } from '../types'
 import { layoutGraph, type LayoutEdge } from '../graphLayout'
 import { cn } from '../lib/cn'
@@ -6,6 +7,8 @@ import { cn } from '../lib/cn'
 const COLOR_ACCENT = '#4fd1ff'
 const COLOR_DANGER = '#f43f5e'
 const COLOR_MUTED = '#44444c'
+
+type View = { x: number; y: number; w: number; h: number }
 
 function edgeColor(e: LayoutEdge) {
   if (e.inCycle) return COLOR_DANGER
@@ -26,6 +29,71 @@ export function ServiceGraph({
   const [hovered, setHovered] = useState<string | null>(null)
   const active = hovered ?? selected
 
+  const svgRef = useRef<SVGSVGElement>(null)
+  const fit = useMemo<View>(() => ({ x: 0, y: 0, w: layout.width, h: layout.height }), [layout])
+  const [view, setView] = useState<View>(fit)
+  const [prevFit, setPrevFit] = useState(fit)
+  if (prevFit !== fit) {
+    setPrevFit(fit)
+    setView(fit)
+  }
+  const dragged = useRef(false)
+  const [panning, setPanning] = useState(false)
+
+  const zoomAt = useCallback(
+    (clientX: number, clientY: number, factor: number) => {
+      const ctm = svgRef.current?.getScreenCTM()
+      if (!ctm) return
+      const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse())
+      // Zoom in until the smallest node roughly fills the view; zoom out to a few times the fit.
+      const minW = Math.min(...Object.values(layout.nodes).map((n) => n.width)) * 1.5
+      const maxW = layout.width * 4
+      setView((v) => {
+        const k = Math.min(Math.max(factor, minW / v.w), maxW / v.w)
+        return { x: p.x - (p.x - v.x) * k, y: p.y - (p.y - v.y) * k, w: v.w * k, h: v.h * k }
+      })
+    },
+    [layout],
+  )
+
+  const zoomCenter = (factor: number) => {
+    const r = svgRef.current?.getBoundingClientRect()
+    if (r) zoomAt(r.left + r.width / 2, r.top + r.height / 2, factor)
+  }
+
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      zoomAt(e.clientX, e.clientY, Math.exp(e.deltaY * 0.0015))
+    }
+    svg.addEventListener('wheel', onWheel, { passive: false })
+    return () => svg.removeEventListener('wheel', onWheel)
+  }, [zoomAt])
+
+  const startPan = (e: React.PointerEvent<SVGSVGElement>) => {
+    const ctm = svgRef.current?.getScreenCTM()
+    if (e.button !== 0 || !ctm) return
+    const start = { cx: e.clientX, cy: e.clientY, v: view, scale: 1 / ctm.a }
+    dragged.current = false
+    const move = (m: PointerEvent) => {
+      const dx = m.clientX - start.cx
+      const dy = m.clientY - start.cy
+      if (!dragged.current && Math.hypot(dx, dy) < 4) return
+      dragged.current = true
+      setPanning(true)
+      setView({ ...start.v, x: start.v.x - dx * start.scale, y: start.v.y - dy * start.scale })
+    }
+    const up = () => {
+      setPanning(false)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   const cycleNodes = useMemo(() => {
     const set = new Set<string>()
     for (const c of graph.cycles) c.cycle.forEach((n) => set.add(n))
@@ -43,12 +111,32 @@ export function ServiceGraph({
   }, [active, layout])
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-bg-elevated">
+    <div className="relative min-w-0 overflow-hidden rounded-lg border border-border bg-bg-elevated">
+      <div className="absolute right-3 top-3 z-10 flex gap-1">
+        <ZoomButton label="Zoom in" onClick={() => zoomCenter(1 / 1.3)}>
+          <Plus size={14} />
+        </ZoomButton>
+        <ZoomButton label="Zoom out" onClick={() => zoomCenter(1.3)}>
+          <Minus size={14} />
+        </ZoomButton>
+        <ZoomButton label="Fit to view" onClick={() => setView(fit)}>
+          <CornersOut size={14} />
+        </ZoomButton>
+      </div>
       <svg
-        viewBox={`0 0 ${layout.width} ${layout.height}`}
-        className="h-auto w-full"
+        ref={svgRef}
+        viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
+        className={cn('block w-full touch-none select-none', panning ? 'cursor-grabbing' : 'cursor-grab')}
+        style={{ aspectRatio: `${layout.width} / ${layout.height}`, maxHeight: '75vh', minHeight: 280 }}
         role="img"
         aria-label="Service dependency graph"
+        onPointerDown={startPan}
+        onClickCapture={(e) => {
+          if (dragged.current) {
+            e.stopPropagation()
+            dragged.current = false
+          }
+        }}
         onClick={() => onSelect(null)}
       >
         <defs>
@@ -117,10 +205,8 @@ export function ServiceGraph({
                   y={n.height / 2}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  className={cn(
-                    'select-none font-mono',
-                    isService ? 'fill-text text-[13px]' : 'fill-text-tertiary text-[11px]',
-                  )}
+                  fontSize={n.fontSize}
+                  className={cn('select-none font-mono', isService ? 'fill-text' : 'fill-text-tertiary')}
                 >
                   {n.id}
                 </text>
@@ -136,6 +222,20 @@ export function ServiceGraph({
         <LegendLine color={COLOR_MUTED} dashed label="docker-compose startup order" />
       </div>
     </div>
+  )
+}
+
+function ZoomButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="grid size-7 place-items-center rounded-md border border-border bg-bg-elevated/90 text-text-tertiary transition-colors hover:text-text"
+    >
+      {children}
+    </button>
   )
 }
 

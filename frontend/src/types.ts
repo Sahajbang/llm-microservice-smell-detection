@@ -4,6 +4,7 @@ export type EdgeSource =
   | 'webclient'
   | 'discovery-client'
   | 'http-literal'
+  | 'gateway-route'
   | 'docker-compose'
 
 export interface Edge {
@@ -93,7 +94,87 @@ export interface Finding {
   metrics: Record<string, unknown>
   llmDetection: (DetectionResult & { smell_key?: string; finding_key?: string }) | null
   refactoring: RefactoringResult | null
+  /** Present only when the run generated a patch (apply mode other than `never`). */
+  patch?: PatchResult | null
   errors: PipelineError[]
+}
+
+export type ApplyMode = 'never' | 'dry-run' | 'ask' | 'auto'
+export type FailurePolicy = 'rollback' | 'keep'
+export type VerifyLevel = 'none' | 'compile' | 'test'
+export type PatchStatus = 'proposed' | 'rejected' | 'verified' | 'rolled_back' | 'failed_kept' | 'error'
+
+export interface PatchFile {
+  path: string
+  action: 'modify' | 'create' | 'delete'
+}
+
+export interface BuildRun {
+  build_system: string
+  cwd: string
+  command?: string
+  returncode?: number | null
+  /** null = the build did not run (tool missing, or already failing before the patch). */
+  passed: boolean | null
+  duration_s?: number
+  output_tail?: string
+  skipped?: string
+}
+
+export interface Verification {
+  passed: boolean
+  build: {
+    status: 'passed' | 'failed' | 'skipped'
+    level: VerifyLevel
+    reason: string | null
+    runs: BuildRun[]
+  }
+  redetection: {
+    resolved: boolean
+    still_detected: boolean
+    remaining_findings: string[]
+    errors: string[]
+  }
+}
+
+export interface PatchResult {
+  status: PatchStatus
+  files: PatchFile[]
+  diff: string
+  decision: string | null
+  verification: Verification | null
+  commit: string | null
+  branch: string | null
+  failure_policy?: FailurePolicy
+  error?: string
+}
+
+export interface RefactorSummary {
+  mode: ApplyMode
+  on_failure: FailurePolicy
+  verify_level: VerifyLevel
+  /** Set only when the branch was kept, i.e. something was committed to it. */
+  branch?: string | null
+  base_commit?: string
+  commits?: string[]
+  inspect?: string
+  clone_kept_at?: string
+  error?: string
+}
+
+/** The question an `ask`-mode run is blocked on. */
+export interface PendingDecision {
+  id: string
+  kind: 'apply' | 'failure'
+  options: string[]
+  default: string
+  finding_key: string
+  smell_name: string
+  services: string[]
+  files: PatchFile[]
+  diff: string
+  rationale?: string | null
+  verification?: Verification
 }
 
 export interface PipelineError {
@@ -120,6 +201,7 @@ export interface RunCounts {
   confirmed_by_llm: number
   refactoring_proposals: number
   errors: number
+  patches_by_status?: Partial<Record<PatchStatus, number>>
 }
 
 export interface RunSummary {
@@ -138,6 +220,7 @@ export interface RunSummary {
   findings: Finding[]
   detectorsRun: string[]
   llmEnabled: boolean | null
+  refactor?: RefactorSummary | null
   errors: PipelineError[]
 }
 
@@ -178,6 +261,9 @@ export interface Job {
   smells: string[]
   llm: boolean
   branch: string | null
+  applyMode: ApplyMode
+  onFailure: FailurePolicy
+  verifyLevel: VerifyLevel
   status: 'running' | 'done' | 'failed'
   startedAt: string
   finishedAt: string | null
@@ -185,6 +271,8 @@ export interface Job {
   phase: string
   events: JobEvent[]
   counts: RunCounts | null
+  refactor: RefactorSummary | null
+  pendingDecision: PendingDecision | null
   error: string | null
 }
 

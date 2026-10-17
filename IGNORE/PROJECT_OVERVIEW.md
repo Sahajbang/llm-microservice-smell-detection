@@ -1,215 +1,132 @@
 # Project Overview
 
-## LLM-Guided Microservice Cyclic Dependency Detection & Autonomous Refactoring
+## LLM-Guided Microservice Code Smell Detection & Autonomous Refactoring
 
-This is a thesis research prototype. It detects the **Cyclic Dependency** architectural
-smell across a Java Spring Boot microservices repository using static analysis (regex
-extraction + graph cycle detection), asks an LLM to confirm the finding is a genuine
-architectural problem and explain why, asks a second LLM call to propose a minimal
-scope-limited fix, and logs every stage's full input/output for reproducibility. A
-read-only dashboard visualizes all of it. Phase 1 scope, per `CLAUDE.md`: one smell, one
-repository, no orchestration framework, manual patch application.
-
-This document describes **what exists today** and how the pieces actually connect. For the
-phased build plan and rationale, see `CLAUDE.md`. For step-by-step status and setup
-instructions, see `README.md`.
+This is a thesis research prototype for detecting architectural smells in Java Spring Boot
+microservice systems and proposing fixes for them, combining deterministic static analysis
+with LLM reasoning. It started (per `CLAUDE.md`) as a one-smell, one-repository Phase 1 MVP
+and has since generalized well past that scope. This document describes **what it actually
+does today**. For the phased build plan see `CLAUDE.md`; for setup, the full status table,
+and known limitations see `README.md`.
 
 ---
 
-## What is actually happening, end to end
+## What it does today
 
-### 1. The target repository
+**Detects three architectural smells**, not just one:
 
-[`spring-petclinic-microservices`](https://github.com/spring-petclinic/spring-petclinic-microservices)
-is cloned into `target-repo/` (gitignored — it's an external repo with its own `.git`, not
-part of this project's history). It has 8 Spring Boot services. A synthetic, clearly-labeled
-cyclic dependency was deliberately introduced between `customers-service` and
-`visits-service` (documented in `target-repo/FIXTURE_NOTES.md`) so that Phase 1 has
-something real to detect.
+| Smell | How it's detected |
+|---|---|
+| **Cyclic Dependency** | The service dependency graph is built with NetworkX and run through `simple_cycles` |
+| **Hub-like Dependency** | A service's degree is tested against the graph's own degree distribution (absolute floor + statistical-outlier test) plus a connectivity-share test |
+| **Shared Persistence** | Services are checked for resolving to the same database identity or declaring overlapping tables, from datasource config, JPA `@Table` declarations, and SQL schema/migration files |
 
-### 2. Extraction (`pipeline/extractor.py`)
+Every smell is detected statically first and validated by an LLM second: the model never
+invents findings, it only judges and explains a candidate that deterministic analysis
+already produced. Its verdict is recorded alongside — never in place of — the deterministic
+severity/confidence.
 
-Scans every top-level Maven module's Java source with regex (no AST parsing, per scope) for
-`@FeignClient(...)`, `DiscoveryClient.getInstances("...")`, and any
-`"http(s)://<service-name>/..."` string literal (covers `RestTemplate` and `WebClient`
-calls), plus `docker-compose.yml` `depends_on` blocks as a secondary, lower-confidence edge
-source. Output is a flat JSON list of `{caller, callee, source, file, line, evidence}`
-records.
+**Analyzes any repository, not just the bundled fixture.** The pipeline takes either a
+**GitHub (or any Git) URL** or a **local path**. A URL is cloned into a scratch `workspace/`
+directory and cleaned up after the run (unless told to keep it); a local checkout is used in
+place. The bundled `target-repo/` (`spring-petclinic-microservices`, with a deliberately
+introduced, documented cyclic dependency — see `target-repo/FIXTURE_NOTES.md`) remains the
+default fixture so a run works out of the box, but it is no longer the only thing the
+pipeline can point at. Recent runs under `logs/runs/` include analyses of several different
+teammates' repositories and branches, run both from the CLI and from the dashboard.
 
-```
-python -m pipeline.extractor target-repo -o logs/edges_current.json
-```
+**Supports Maven and Gradle**, not just Maven. Module (service) discovery recognizes a
+top-level directory as a service by either a `pom.xml` **or** a `build.gradle`/
+`build.gradle.kts` at its root. The service's name is resolved from the Maven `artifactId`
+when one is declared, or falls back to the Gradle module directory's own name for a
+standalone Gradle module (matching Gradle's own default artifact-naming convention, rather
+than inventing one). Both paths are covered by the test suite, not just documented.
 
-### 3. Graph construction & cycle detection (`pipeline/graph_analysis.py`)
+**Runs end to end with one command.** `pipeline/run_pipeline.py` chains acquisition →
+evidence extraction → all three detectors → LLM validation → LLM refactoring proposals →
+logging, with no smell-specific logic of its own and per-stage error isolation — a failing
+detector or a failing LLM call for one finding doesn't take down the rest of the run.
 
-Loads the edge list into a `networkx.DiGraph` (`build_graph`, collapsing duplicate
-caller/callee pairs but keeping all underlying evidence), then runs `nx.simple_cycles`
-(`detect_cycles`). `docker-compose` edges are excluded from cycle detection by default —
-they encode container startup order, not request-flow coupling. `cycle_evidence()` maps a
-detected cycle back to the exact file/line evidence for each hop, which feeds the next step.
-This step has no CLI of its own in normal use — steps 4 and 5 call it internally.
-
-### 4. LLM Detection Agent (`pipeline/llm_detection.py`)
-
-For every candidate cycle found in step 3, makes one LLM call (NVIDIA's OpenAI-compatible
-endpoint, not the Claude API — see the module's provider note) grounded in the real code
-evidence for each hop, requesting structured JSON: `detected`, `confidence`, `severity`,
-`rationale`, `refactoring_recommended`. Includes a JSON-repair/retry loop
-(`pipeline/json_utils.py`) for malformed responses.
-
-```
-python -m pipeline.llm_detection logs/edges_current.json --repo-root target-repo
+```bash
+python -m pipeline.run_pipeline https://github.com/owner/repo.git
+python -m pipeline.run_pipeline target-repo --no-llm
+python -m pipeline.run_pipeline target-repo --smells cyclic_dependency hub_dependency
 ```
 
-### 5. LLM Refactoring Agent (`pipeline/llm_refactoring.py`)
+**Proposes fixes, scope-checked.** For every finding the LLM confirms and recommends a fix
+for, a second LLM call proposes the minimal change that resolves it — affected files,
+per-file changes, rationale, expected impact — and a scope-enforcement check rejects and
+re-prompts if the plan names a file outside the services actually implicated in the finding.
 
-Internally re-runs steps 3 and 4, then — for every cycle the detection agent confirmed and
-recommended a fix for — makes a second LLM call proposing the **minimal** change that breaks
-it: affected files, per-file changes (method/class + description), rationale, expected
-impact. A **scope-enforcement check** rejects and re-prompts (bounded retries) if the plan
-names any file outside the services participating in the cycle.
+**Logs everything.** Every run writes one timestamped directory under `logs/runs/` with one
+JSON file per stage — full prompts, raw LLM responses, reasoning traces, parse/scope-check
+status — across every smell detected in that run, so any run is reproducible and auditable
+after the fact.
 
-```
-python -m pipeline.llm_refactoring logs/edges_current.json --repo-root target-repo
-```
+**Has a dashboard that starts runs, not just displays them.** From `/analyze` you pick a
+repository (the bundled fixture or any public HTTPS Git URL), choose which smells to check
+and whether to include LLM validation, and watch real per-stage progress as the pipeline
+writes each stage to disk — nothing in the progress view is simulated. `/detection`,
+`/refactoring`, `/graph`, and `/runs` read the results of any completed run: findings with
+both deterministic and LLM verdicts side by side, proposed fixes, a hand-built SVG of the
+service dependency graph, and run history.
 
-Running this one command is enough to exercise steps 3, 4, and 5 in one pass — there is no
-separate orchestrator (`run_pipeline.py` doesn't exist yet).
-
-### 6. Manual apply & verify — not yet automated
-
-Applying the proposed fix to `target-repo`, re-running `mvn test`, and re-running the
-extractor/cycle-detector to confirm the cycle disappeared is currently a manual step. This
-is Phase 1's explicit final accept/reject gate and the next piece of the loop to close.
-
-### 7. Logging (`pipeline/run_logger.py`)
-
-Every `RunLogger` instance creates one timestamped directory under `logs/runs/`
-(`<UTC-timestamp>_<label>/`) and writes one JSON file per stage into it (full prompts, raw
-LLM responses, chain-of-thought reasoning, parse/scope-check status included) — this is what
-makes a run reproducible and auditable after the fact.
-
-### 8. The dashboard (read-only, doesn't trigger any of the above)
-
-- **`api/main.py`** is a small FastAPI layer that reads `logs/edges_current.json` and
-  `logs/runs/*/*.json` off disk, reusing `pipeline.graph_analysis` directly (rather than
-  re-deriving cycle detection in JavaScript) to serve a live-recomputed graph/cycle view.
-  Run: `python -m uvicorn api.main:app --reload --port 8000` (from the repo root).
-- **`frontend/`** is a Vite + React + TypeScript SPA that renders that data: an interactive
-  SVG dependency graph, the detection verdict and refactoring proposal with their full
-  reasoning traces, and the run history. Run: `npm run dev` from `frontend/`, then open
-  `http://localhost:5173`.
-- Nothing in the dashboard invokes steps 2-5 — it's a viewer over whatever is already on
-  disk. Adding a "run the pipeline" trigger is a natural next step once
-  `run_pipeline.py` exists.
+**Still manual: applying a fix.** A proposed refactoring plan is not applied to code, `mvn
+test` is not re-run, and the pipeline is not re-run to confirm a finding disappeared —
+that accept/reject step is still a human doing it by hand. This is Phase 1's one remaining
+open loop.
 
 ---
 
-## Architecture diagram
+## How a run actually flows
 
-```mermaid
-flowchart TD
-    subgraph TR["target-repo (Spring Boot microservices)"]
-        JAVA["Java source: FeignClient, RestTemplate, WebClient"]
-        COMPOSE["docker-compose.yml depends_on blocks"]
-    end
+1. **Acquire** (`pipeline/repository.py`) — clone the Git URL or use the local path.
+2. **Extract evidence** (`pipeline/extractors/`) — `rest.py` for Feign/RestTemplate/WebClient
+   call sites (recognizing Maven or Gradle modules), `docker.py` for `docker-compose.yml`
+   `depends_on` edges, `persistence.py` for datasource/JPA/SQL schema evidence.
+3. **Build the graph** (`pipeline/graph_analysis.py`) — a `networkx.DiGraph` of service call
+   edges, with cycles canonicalized so the same graph always yields identical output.
+4. **Detect** (`pipeline/detectors/`) — the registry runs every requested smell detector
+   against that graph/evidence and produces `Finding` objects.
+5. **Validate** (`pipeline/llm_detection.py`) — one LLM call per finding, grounded in the real
+   code evidence, prompted from that smell's spec in `pipeline/smells.py`.
+6. **Propose a fix** (`pipeline/llm_refactoring.py`) — for confirmed, fix-recommended
+   findings, a scope-checked minimal refactoring plan.
+7. **Log** (`pipeline/run_logger.py`) — every stage's input/output written to
+   `logs/runs/<timestamp>_<label>/`.
+8. **(Manual)** — apply the plan, re-test, re-run the pipeline to confirm the finding is gone.
 
-    subgraph PIPE["pipeline (Python)"]
-        EXT["extractor.py -- Step 2: regex extraction"]
-        GA["graph_analysis.py -- Step 3: NetworkX build_graph + detect_cycles"]
-        DET["llm_detection.py -- Step 4: confirm the cycle is a real problem"]
-        REF["llm_refactoring.py -- Step 5: propose a scope-checked minimal fix"]
-        LOG["run_logger.py -- Step 7: per-run JSON logging"]
-    end
-
-    LLM["NVIDIA-hosted LLM API (OpenAI-compatible)"]
-
-    subgraph DISK["logs (on disk)"]
-        EDGES["edges_current.json"]
-        RUNS["runs/timestamp_label/ : step3_graph, step4_detection, step5_refactoring"]
-    end
-
-    MANUAL["Manual: apply fix to target-repo, run mvn test -- Step 6, not automated"]
-
-    subgraph API["api/main.py (FastAPI, read-only)"]
-        A1["/api/overview"]
-        A2["/api/graph"]
-        A3["/api/runs"]
-        A4["/api/runs/:id"]
-    end
-
-    subgraph FE["frontend (Vite + React dashboard)"]
-        P1["Overview page"]
-        P2["Graph page"]
-        P3["Detection page"]
-        P4["Refactoring page"]
-        P5["Runs page"]
-    end
-
-    JAVA --> EXT
-    COMPOSE --> EXT
-    EXT --> EDGES
-    EDGES --> GA
-    GA -->|candidate cycle + evidence| DET
-    DET <-->|prompt / structured JSON| LLM
-    DET -->|confirmed + refactoring_recommended| REF
-    REF <-->|prompt / structured JSON| LLM
-    DET --> LOG
-    REF --> LOG
-    LOG --> RUNS
-    REF -->|proposed fix| MANUAL
-    MANUAL -->|re-run to confirm cycle gone| EXT
-
-    EDGES --> A2
-    GA --> A1
-    RUNS --> A1
-    RUNS --> A3
-    RUNS --> A4
-
-    A1 --> P1
-    A2 --> P2
-    A4 --> P3
-    A4 --> P4
-    A3 --> P5
-
-    classDef pipeline fill:#1c1c20,stroke:#4fd1ff,color:#edeef0
-    classDef external fill:#3f2e0a,stroke:#f59e0b,color:#edeef0
-    classDef storage fill:#141417,stroke:#a3a3ad,color:#edeef0
-    classDef manual fill:#3f1420,stroke:#f43f5e,color:#edeef0
-    classDef api fill:#0f3b2c,stroke:#34d399,color:#edeef0
-    classDef frontend fill:#1c4c5c,stroke:#4fd1ff,color:#edeef0
-
-    class EXT,GA,DET,REF,LOG pipeline
-    class LLM external
-    class EDGES,RUNS storage
-    class MANUAL manual
-    class A1,A2,A3,A4 api
-    class P1,P2,P3,P4,P5 frontend
-```
+Adding a new smell touches only a new detector module and a new spec entry — the
+orchestrator, the LLM agents, and the API need no changes.
 
 ---
 
 ## Repository map
 
 ```
-pipeline/         Steps 2, 3, 4, 5, 7 -- extractor, graph analysis, LLM agents, logging
-api/              Step 8 (dashboard backend) -- read-only FastAPI layer over logs/
-frontend/         Step 8 (dashboard frontend) -- Vite + React + TypeScript SPA
-tests/            pytest suite, one file per pipeline module
-target-repo/      cloned target repo (gitignored, not part of this project's git history)
-logs/             edges_current.json (latest extraction) + runs/ (per-run stage logs)
-IGNORE/           reference docs only (the PRD) -- never commit generated output here
-CLAUDE.md         phased implementation guide (Phase 1 steps, Phase 2+ roadmap)
-README.md         status table, setup instructions, current known issues
+pipeline/            orchestrator, models, config, smell specs, repository acquisition
+pipeline/extractors/ evidence collectors: rest (Maven + Gradle), docker, persistence
+pipeline/detectors/  cyclic_dependency, hub_dependency, shared_persistence + the registry
+api/                 FastAPI layer: reads logs/, starts runs (api/jobs.py)
+frontend/            Vite + React + TypeScript dashboard
+tests/               pytest suite, offline (LLM calls and git clones mocked)
+target-repo/         bundled default target repository (committed, incl. the fixture)
+workspace/           repositories cloned by URL (gitignored, cleaned up after each run)
+logs/                edges_current.json (sample) + runs/ (per-run stage logs across repos)
+IGNORE/              reference docs only (the PRD) -- never commit generated output here
+CLAUDE.md            phased implementation guide (Phase 1 steps, Phase 2+ roadmap)
+README.md            status table, setup instructions, current known issues
 ```
 
-## Known gaps (see `README.md` for full detail)
+## Known limitations (see `README.md` for full detail)
 
-- `detect_cycles()` returns a cycle starting at whichever node NetworkX's traversal hits
-  first, not a canonicalized rotation — the same cycle can print as `A -> B -> A` or
-  `B -> A -> B` across runs.
-- The synthetic cyclic-dependency fixture on `target-repo` exists only as uncommitted local
-  changes; it isn't yet exported as a reproducible patch file.
-- No single command chains steps 2 through 7 (though `llm_refactoring.py` alone already
-  covers steps 3-5).
-- The dashboard is read-only; it doesn't yet trigger new pipeline runs.
+- REST only — gRPC and message-queue communication are invisible to the extractor (a stated
+  scope boundary, not a gap).
+- Regex-based, not AST — a call assembled dynamically with no literal service-name string is
+  missed.
+- Java/Spring Boot only, on Maven **or** Gradle — other build tools and non-Spring stacks
+  aren't supported.
+- Shared Persistence can't prove physical sharing (identical names may be different
+  instances/tables); confidence is reported accordingly.
+- Temporal coupling isn't implemented — no static heuristic for it is claimed.
+- Step 6 (apply & verify) is still a manual step.
