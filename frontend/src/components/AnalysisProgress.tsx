@@ -91,9 +91,11 @@ function Station({
         {events.length > 0 && (
           <ul className="mt-1.5 space-y-1">
             {events.map((e, i) => (
-              <li key={`${e.at}-${i}`} className="text-[13px] leading-snug text-text-secondary">
+              <li key={`${e.at}-${i}`} className="break-words text-[13px] leading-snug text-text-secondary">
                 {e.label}
-                {e.detail && <span className="ml-2 font-mono text-[11px] text-text-tertiary">{e.detail}</span>}
+                {e.detail && (
+                  <span className="ml-2 break-words font-mono text-[11px] text-text-tertiary">{e.detail}</span>
+                )}
               </li>
             ))}
           </ul>
@@ -120,11 +122,11 @@ function EventFeed({ events, running }: { events: JobEvent[]; running: boolean }
       <div className="max-h-[22rem] flex-1 overflow-y-auto px-4 py-3">
         <ol className="space-y-2">
           {events.map((e, i) => (
-            <li key={`${e.at}-${i}`} className="event-in font-mono text-[12px] leading-relaxed">
+            <li key={`${e.at}-${i}`} className="event-in break-words font-mono text-[12px] leading-relaxed">
               <span className="text-text-tertiary">{e.at.slice(11, 19)}</span>{' '}
               <span className="text-accent/80">{e.phase}</span>{' '}
               <span className="text-text-secondary">{e.label}</span>
-              {e.detail && <div className="pl-[4.5rem] text-text-tertiary">{e.detail}</div>}
+              {e.detail && <div className="break-words pl-[4.5rem] text-text-tertiary">{e.detail}</div>}
             </li>
           ))}
           {running && (
@@ -268,14 +270,14 @@ export function AnalysisProgress({
               .join(' · ') || 'none generated'}
           </span>
           {job.refactor?.branch ? (
-            <p className="mt-2 font-mono text-xs text-text">
+            <p className="mt-2 break-words font-mono text-xs text-text">
               Branch <span className="text-accent">{job.refactor.branch}</span> &mdash; {job.refactor.inspect}
               {job.refactor.clone_kept_at && (
                 <span className="block text-text-tertiary">clone kept at {job.refactor.clone_kept_at}</span>
               )}
             </p>
           ) : (
-            job.refactor?.error && <p className="mt-2 text-xs text-danger">{job.refactor.error}</p>
+            job.refactor?.error && <p className="mt-2 break-words text-xs text-danger">{job.refactor.error}</p>
           )}
         </div>
       )}
